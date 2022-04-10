@@ -3,4 +3,6 @@ scipy >=0.13
 traits >=4.4
 ipython
 # non-acoular packages needed to build sphinx documentation:
+numpydoc
+sounddevice
 # sphinx, graphviz, matplotlib, ipython, numpydoc, python-sounddevice(conda-forge)
