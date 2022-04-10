@@ -12,6 +12,10 @@
 
 import sys, os
 
+# Fake import to avoid actually loading CFFI and the PortAudio library
+import fake__sounddevice
+sys.modules['_sounddevice'] = sys.modules['fake__sounddevice']
+
 # If your extensions are in another directory, add it here. If the directory
 # is relative to the documentation root, use os.path.abspath to make it
 # absolute, like shown here.
