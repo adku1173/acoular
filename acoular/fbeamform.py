@@ -24,6 +24,8 @@
     BeamformerCMF
     BeamformerSODIX
     BeamformerGIB
+    BeamformerAdaptiveGrid
+    BeamformerGridlessOrth
 
     PointSpreadFunction
     L_p
@@ -36,19 +38,19 @@ from __future__ import print_function, division
 
 import warnings
 
-from numpy import array, ones, full, hanning, hamming, bartlett, blackman, \
-invert, dot, newaxis, zeros, empty, fft, float32, float64, complex64, linalg, \
-where, searchsorted, pi, multiply, sign, diag, arange, sqrt, exp, log10, int,\
+from numpy import array, ones, full, \
+invert, dot, newaxis, zeros, linalg, \
+searchsorted, pi, sign, diag, arange, sqrt, log10, \
 reshape, hstack, vstack, eye, tril, size, clip, tile, round, delete, \
-absolute, argsort, sort, sum, hsplit, fill_diagonal, zeros_like, isclose, \
-vdot, flatnonzero, einsum, ndarray, isscalar, inf, real
+absolute, argsort, sum, hsplit, fill_diagonal, zeros_like, \
+einsum, ndarray, isscalar, inf, real, unique
 
 from numpy.linalg import norm
 
 from sklearn.linear_model import LassoLars, LassoLarsCV, LassoLarsIC,\
-OrthogonalMatchingPursuit, ElasticNet, OrthogonalMatchingPursuitCV, Lasso
+OrthogonalMatchingPursuitCV, LinearRegression
 
-from scipy.optimize import nnls, linprog, fmin_l_bfgs_b
+from scipy.optimize import nnls, linprog, fmin_l_bfgs_b, shgo
 from scipy.linalg import inv, eigh, eigvals, fractional_matrix_power
 from warnings import warn
 
@@ -60,9 +62,9 @@ try:
 except:
     PYLOPS_TRUE = False
 
-from traits.api import HasPrivateTraits, Float, Int, ListInt, ListFloat, \
+from traits.api import HasPrivateTraits, Float, Int, \
 CArray, Property, Instance, Trait, Bool, Range, Delegate, Enum, Any, \
-cached_property, on_trait_change, property_depends_on
+cached_property, on_trait_change, property_depends_on, List, Tuple, Dict
 from traits.trait_errors import TraitError
 
 from .fastFuncs import beamformerFreq, calcTransfer, calcPointSpreadFunction, \
@@ -395,7 +397,7 @@ class BeamformerBase( HasPrivateTraits ):
         H5cache.get_cache_file( self, self.freq_data.basename ) 
         if not self.h5f: 
 #            print("no cachefile:", self.freq_data.basename)
-            return (None, None)# only happens in case of global caching readonly
+            return (None, None, None)# only happens in case of global caching readonly
 
         nodename = self.__class__.__name__ + self.digest
 #        print("collect filecache for nodename:",nodename)
@@ -406,22 +408,37 @@ class BeamformerBase( HasPrivateTraits ):
         if not self.h5f.is_cached(nodename):
 #            print("no data existent for nodename:", nodename)
             if config.global_caching == 'readonly': 
-                return (None, None)
+                return (None, None, None)
             else:
 #                print("initialize data.")
                 numfreq = self.freq_data.fftfreq().shape[0]# block_size/2 + 1steer_obj
                 group = self.h5f.create_new_group(nodename)
-                self.h5f.create_compressible_array('result',
-                                      (numfreq, self.steer.grid.size),
-                                      self.precision,
-                                      group)
                 self.h5f.create_compressible_array('freqs',
                                       (numfreq, ),
                                       'int8',#'bool', 
                                       group)
+                if isinstance(self,BeamformerAdaptiveGrid):
+                    self.h5f.create_compressible_array('gpos',
+                                      (3, self.size),
+                                      'float64',
+                                      group)
+                    self.h5f.create_compressible_array('result',
+                                      (numfreq, self.size),
+                                      self.precision,
+                                      group)
+                else:
+                    self.h5f.create_compressible_array('result',
+                                      (numfreq, self.steer.grid.size),
+                                      self.precision,
+                                      group)
+
         ac = self.h5f.get_data_by_reference('result','/'+nodename)
         fr = self.h5f.get_data_by_reference('freqs','/'+nodename)
-        return (ac,fr)        
+        if isinstance(self,BeamformerAdaptiveGrid):
+            gpos = self.h5f.get_data_by_reference('gpos','/'+nodename)
+        else:
+            gpos = None
+        return (ac,fr,gpos)        
 
     def _assert_equal_channels(self):
         numchannels = self.freq_data.numchannels
@@ -440,30 +457,32 @@ class BeamformerBase( HasPrivateTraits ):
         while self.digest != _digest:
             _digest = self.digest
             self._assert_equal_channels()
+            ac, fr = (None, None)
             if not ( # if result caching is active
                     config.global_caching == 'none' or 
                     (config.global_caching == 'individual' and self.cached == False)
                 ):
 #                print("get filecache..")
-                (ac,fr) = self._get_filecache() 
-                if ac and fr: 
+                (ac,fr,gpos) = self._get_filecache() 
+                if gpos:
+                    self._gpos = gpos
+            if ac and fr: 
 #                    print("cached data existent")
-                    if not fr[f.ind_low:f.ind_high].all():
+                if not fr[f.ind_low:f.ind_high].all():
 #                        print("calculate missing results")                            
-                        if config.global_caching == 'readonly': 
-                            (ac, fr) = (ac[:], fr[:])
-                        self.calc(ac,fr)
-                        self.h5f.flush()
+                    if config.global_caching == 'readonly': 
+                        (ac, fr) = (ac[:], fr[:])
+                    self.calc(ac,fr)
+                    self.h5f.flush()
 #                    else:
 #                        print("cached results are complete! return.")
-                else:
-#                    print("no caching, calculate result")
-                    ac = zeros((numfreq, self.steer.grid.size), dtype=self.precision)
-                    fr = zeros(numfreq, dtype='int8')
-                    self.calc(ac,fr)
             else:
-#                print("no caching activated, calculate result")
-                ac = zeros((numfreq, self.steer.grid.size), dtype=self.precision)
+#                print("no caching or not activated, calculate result")
+                if isinstance(self,BeamformerAdaptiveGrid):
+                    self._gpos = zeros((3, self.size), dtype=self.precision)
+                    ac = zeros((numfreq, self.size), dtype=self.precision)
+                else:
+                    ac = zeros((numfreq, self.steer.grid.size), dtype=self.precision)
                 fr = zeros(numfreq, dtype='int8')
                 self.calc(ac,fr)
         return ac
@@ -626,7 +645,10 @@ class BeamformerBase( HasPrivateTraits ):
                          'for all queried frequencies. Check '
                          'freq_data.ind_low and freq_data.ind_high!',
                           Warning, stacklevel = 2)
-        return h.reshape(self.steer.grid.shape)
+        if isinstance(self,BeamformerAdaptiveGrid):
+            return h
+        else:
+            return h.reshape(self.steer.grid.shape)
 
 
     def integrate(self, sector):
@@ -1393,27 +1415,42 @@ class BeamformerDamasPlus (BeamformerDamas):
                 p.freq = f[i]
                 psf = p.psf[:]
 
-                if self.method == 'NNLS':
-                    resopt = nnls(psf,y)[0]
-                elif self.method == 'LP': # linear programming (Dougherty)
+                if self.method == "NNLS":
+                    ac[i] = nnls(psf, y)[0] / unit
+                elif self.method == "LP":  # linear programming (Dougherty)
                     if self.r_diag:
-                        warn('Linear programming solver may fail when CSM main '
-                              'diagonal is removed for delay-and-sum beamforming.', 
-                              Warning, stacklevel = 5)
-                    cT = -1*psf.sum(1) # turn the minimization into a maximization
-                    resopt = linprog(c=cT, A_ub=psf, b_ub=y).x # defaults to simplex method and non-negative x
-                elif self.method == 'LassoLars':
-                    model = LassoLars(alpha = self.alpha * unit, 
-                                      max_iter = self.max_iter)
-                else: # self.method == 'OMPCV':
-                    model = OrthogonalMatchingPursuitCV()
-                
-                
-                if self.method in ('NNLS','LP'):
-                    ac[i] = resopt / unit
-                else: # sklearn models
-                    model.fit(psf,y)
-                    ac[i] = model.coef_[:] / unit
+                        warn(
+                            "Linear programming solver may fail when CSM main "
+                            "diagonal is removed for delay-and-sum beamforming.",
+                            Warning,
+                            stacklevel=5,
+                        )
+                    cT = -1 * psf.sum(1)  # turn the minimization into a maximization
+                    ac[i] = (
+                        linprog(c=cT, A_ub=psf, b_ub=y).x / unit
+                    )  # defaults to simplex method and non-negative x
+                else:
+                    if self.method == "LassoLars":
+                        model = LassoLars(
+                            alpha=self.alpha * unit, max_iter=self.max_iter
+                        )
+                    elif self.method == "OMPCV":
+                        model = OrthogonalMatchingPursuitCV()
+                    else:
+                        raise NotImplementedError(f"%model solver not implemented")
+                    model.normalize = False
+                    # from sklearn 1.2, normalize=True does not work the same way anymore and the pipeline approach
+                    # with StandardScaler does scale in a different way, thus we monkeypatch the code and normalize
+                    # ourselves to make results the same over different sklearn versions
+                    norms = norm(psf, axis=0)
+                    # get rid of annoying sklearn warnings that appear
+                    # for sklearn<1.2 despite any settings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", category=FutureWarning)
+                        # normalized psf
+                        model.fit(psf / norms, y)
+                    # recover normalization in the coef's
+                    ac[i] = model.coef_[:] / norms / unit
                 
                 fr[i] = 1
 
@@ -1843,13 +1880,7 @@ class BeamformerCMF ( BeamformerBase ):
                 else:
                     # take all real parts -- also main diagonal
                     ind_reim = hstack([ones(size(ind_im0),)>0,ind_im0])
-                    ind_reim[0]=True # TODO: warum hier extra definiert??
-#                    if sigma2:
-#                        # identity matrix, needed when noise term sigma is used
-#                        I  = eye(nc).reshape(nc*nc,1)                
-#                        A = realify( hstack([Ac, I])[ind,:] )[ind_reim,:]
-#                        # ... ac[i] = model.coef_[:-1]
-#                    else:
+                    ind_reim[0]=True # why this ?
 
                 A = realify( Ac [ind,:] )[ind_reim,:]
                 # use csm.T for column stacking reshape!
@@ -1857,18 +1888,18 @@ class BeamformerCMF ( BeamformerBase ):
                 # choose method
                 if self.method == 'LassoLars':
                     model = LassoLars(alpha = self.alpha * unit,
-                                      max_iter = self.max_iter)
+                                      max_iter = self.max_iter, 
+                                      normalize=False)
                 elif self.method == 'LassoLarsBIC':
                     model = LassoLarsIC(criterion = 'bic',
-                                        max_iter = self.max_iter)
+                                        max_iter = self.max_iter, 
+                                        normalize=False,)
                 elif self.method == 'OMPCV':
-                    model = OrthogonalMatchingPursuitCV()
+                    model = OrthogonalMatchingPursuitCV(normalize=False)
+                elif self.method == 'NNLS':
+                    model = LinearRegression(normalize=False, positive=True)
 
-                # nnls is not in sklearn
-                if self.method == 'NNLS':
-                    ac[i] , x = nnls(A,R.flat)
-                    ac[i] /= unit
-                elif self.method == 'Split_Bregman' and PYLOPS_TRUE:   
+                if self.method == 'Split_Bregman' and PYLOPS_TRUE:   
                     Oop = MatrixMult(A) #tranfer operator 
                     Iop = self.alpha*Identity(numpoints) # regularisation 
                     ac[i],iterations = SplitBregman(Oop, [Iop] , R[:,0], 
@@ -1910,11 +1941,17 @@ class BeamformerCMF ( BeamformerBase ):
                     
                     ac[i] /= unit
                 else:
-                    # get rid of annoying sklearn warnings that appear despite any settings
+                    # from sklearn 1.2, normalize=True does not work the same way anymore and the pipeline
+                    # approach with StandardScaler does scale in a different way, thus we monkeypatch the 
+                    # code and normalize ourselves to make results the same over different sklearn versions
+                    norms = norm(A, axis=0)
+                    # get rid of annoying sklearn warnings that appear for sklearn<1.2 despite any settings
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", category=FutureWarning)
-                        model.fit(A,R[:,0])
-                    ac[i] = model.coef_[:] / unit
+                        # normalized A
+                        model.fit(A/norms,R[:,0])
+                    # recover normalization in the coef's
+                    ac[i] = model.coef_[:] / norms / unit
                 fr[i] = 1
                 
 
@@ -1930,8 +1967,8 @@ class BeamformerSODIX( BeamformerBase ):
     Source directivity modeling in the cross-spectral matrix
     """
     #: Type of fit method to be used ('fmin_l_bfgs_b').
-    #: These methods is implemented in 
-    #: the `scipy module.
+    #: These methods are implemented in 
+    #: the scipy module.
     method = Trait('fmin_l_bfgs_b', desc="fit method used")
         
     #: Maximum number of iterations,
@@ -2131,7 +2168,7 @@ class BeamformerSODIX( BeamformerBase ):
         ac : array of floats
             This array of dimension ([number of frequencies]x[number of gridpoints]x[number of microphones])
             is used as call-by-reference parameter and contains the calculated
-          #/= unit   value after calling this method. 
+            value after calling this method. 
         fr : array of booleans
             The entries of this [number of frequencies]-sized array are either 
             'True' (if the result for this frequency has already been calculated)
@@ -2389,21 +2426,34 @@ class BeamformerGIB(BeamformerEig):  #BeamformerEig #BeamformerBase
                             AB = vstack([hstack([A.real,-A.imag]),hstack([A.imag,A.real])])
                             R  = hstack([emode.real.T,emode.imag.T]) * unit
                             if self.method == 'LassoLars':
-                                model = LassoLars(alpha=self.alpha * unit,max_iter=self.max_iter)
+                                model = LassoLars(alpha=self.alpha * unit,
+                                                  max_iter=self.max_iter)
                             elif self.method == 'LassoLarsBIC':
-                                model = LassoLarsIC(criterion='bic',max_iter=self.max_iter)
+                                model = LassoLarsIC(criterion='bic',
+                                                    max_iter=self.max_iter)
                             elif self.method == 'OMPCV':
                                 model = OrthogonalMatchingPursuitCV()
                             elif self.method == 'LassoLarsCV':
-                                model = LassoLarsCV()                        
-                            if self.method == 'NNLS':
-                                x , zz = nnls(AB,R)
-                                qi_real,qi_imag = hsplit(x/unit, 2) 
-                            else:
-                                with warnings.catch_warnings():
-                                    warnings.simplefilter("ignore", category=FutureWarning)
-                                    model.fit(AB,R)
-                                qi_real,qi_imag = hsplit(model.coef_[:]/unit, 2)
+                                model = LassoLarsCV()
+                            elif self.method == 'NNLS':
+                                model = LinearRegression(positive=True)
+                            model.normalize = False
+                            # from sklearn 1.2, normalize=True does not work 
+                            # the same way anymore and the pipeline approach 
+                            # with StandardScaler does scale in a different 
+                            # way, thus we monkeypatch the code and normalize
+                            # ourselves to make results the same over different
+                            # sklearn versions
+                            norms = norm(AB, axis=0)
+                            # get rid of annoying sklearn warnings that appear
+                            # for sklearn<1.2 despite any settings
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore",
+                                                      category=FutureWarning)
+                                # normalized A
+                                model.fit(AB/norms,R)
+                            # recover normalization in the coef's
+                            qi_real,qi_imag = hsplit(model.coef_[:]/norms/unit, 2)
                             #print(s,qi.size)    
                             qi[s,locpoints] = qi_real+qi_imag*1j
                     else:
@@ -2413,6 +2463,172 @@ class BeamformerGIB(BeamformerEig):  #BeamformerEig #BeamformerBase
                 temp[locpoints] = sum(absolute(qi[:,locpoints])**2,axis=0)
                 ac[i] = temp
                 fr[i] = 1    
+
+class BeamformerAdaptiveGrid(BeamformerBase,Grid):
+    """
+    Base class for array methods without predefined grid
+    """
+    
+    # the grid positions live in a shadow trait
+    _gpos = Any
+
+    def _get_shape ( self ):
+        return (self.size,)
+
+    def _get_gpos( self ):
+        return self._gpos
+
+    def integrate(self, sector):
+        """
+        Integrates result map over a given sector.
+        
+        Parameters
+        ----------
+        sector: :class:`~acoular.grids.Sector` or derived
+            Gives the sector over which to integrate
+              
+        Returns
+        -------
+        array of floats
+            The spectrum (all calculated frequency bands) for the integrated sector.
+        """
+        ind = self.subdomain(sector)
+        r = self.result
+        h = zeros(r.shape[0])
+        for i in range(r.shape[0]):
+            h[i] = r[i][ind].sum()
+        return h
+
+class BeamformerGridlessOrth(BeamformerAdaptiveGrid):
+    """
+    Orthogonal beamforming without predefined grid
+    """
+
+    #: List of components to consider, use this to directly set the eigenvalues
+    #: used in the beamformer. Alternatively, set :attr:`n`.
+    eva_list = CArray(dtype=int,
+        desc="components")
+        
+    #: Number of components to consider, defaults to 1. If set, 
+    #: :attr:`eva_list` will contain
+    #: the indices of the n largest eigenvalues. Setting :attr:`eva_list` 
+    #: afterwards will override this value.
+    n = Int(1)
+
+    #: Geometrical bounds of the search domain to consider.
+    #: :attr:`bound` ist a list that contains exactly three tuple of 
+    #: (min,max) for each of the coordinates x, y, z. 
+    #: Defaults to [(-1.,1.),(-1.,1.),(0.01,1.)]
+    bounds = List( Tuple(Float,Float), minlen=3, maxlen=3,
+        value = [(-1.,1.),(-1.,1.),(0.01,1.)])
+
+    #: options dictionary for the SHGO solver, see 
+    #: `scipy docs <https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.shgo.html>`_.
+    #: Default is Sobol sampling Nelder-Mead local minimizer, 256 initial sampling points 
+    #: and 1 iteration
+    shgo = Dict
+
+    # internal identifier
+    digest = Property( 
+        depends_on = ['freq_data.digest', '_steer_obj.digest', 'r_diag', 
+            'eva_list','bounds','shgo'], 
+        )
+   
+    @cached_property
+    def _get_digest( self ):
+        return digest( self )
+
+    @on_trait_change('n')
+    def set_eva_list(self):
+        """ sets the list of eigenvalues to consider """
+        self.eva_list = arange(-1, -1-self.n, -1)
+
+    @on_trait_change('eva_list')
+    def set_n(self):
+        """ sets the list of eigenvalues to consider """
+        self.n = self.eva_list.shape[0]
+    
+    @property_depends_on('n')
+    def _get_size ( self ):
+        return self.n*self.freq_data.fftfreq().shape[0]
+
+    def calc(self, ac, fr):
+        """
+        Calculates the result for the frequencies defined by :attr:`freq_data`
+        
+        This is an internal helper function that is automatically called when 
+        accessing the beamformer's :attr:`~BeamformerBase.result` or calling
+        its :meth:`~BeamformerBase.synthetic` method.        
+        
+        Parameters
+        ----------
+        ac : array of floats
+            This array of dimension ([number of frequencies]x[number of gridpoints])
+            is used as call-by-reference parameter and contains the calculated
+            value after calling this method. 
+        fr : array of booleans
+            The entries of this [number of frequencies]-sized array are either 
+            'True' (if the result for this frequency has already been calculated)
+            or 'False' (for the frequencies where the result has yet to be calculated).
+            After the calculation at a certain frequency the value will be set
+            to 'True'
+        
+        Returns
+        -------
+        This method only returns values through the *ac* and *fr* parameters
+        """
+        f = self.freq_data.fftfreq()
+        numchannels = self.freq_data.numchannels
+        # eigenvalue number list in standard form from largest to smallest 
+        eva_list = unique(self.eva_list % self.steer.mics.num_mics)[::-1]
+        steer_type = self.steer.steer_type
+        if steer_type == 'custom':
+            raise NotImplementedError('custom steer_type is not implemented')
+        mpos = self.steer.mics.mpos
+        env = self.steer.env
+        shgo_opts = {'n':256,'iters':1,'sampling_method':'sobol',
+                        'options':{'local_iter':1},
+                        'minimizer_kwargs':{'method':'Nelder-Mead'}
+                        }
+        shgo_opts.update(self.shgo)
+        roi = []
+        for x in self.bounds[0]:
+            for y in self.bounds[1]:
+                for z in self.bounds[2]:
+                    roi.append((x,y,z))
+        self.steer.env.roi = array(roi).T
+        bmin = array(tuple(map(min,self.bounds)))
+        bmax = array(tuple(map(max,self.bounds)))
+        for i in self.freq_data.indices:
+            if not fr[i]:
+                eva = array(self.freq_data.eva[i], dtype='float64')
+                eve = array(self.freq_data.eve[i], dtype='complex128')
+                k = 2*pi*f[i]/env.c
+                for j,n in enumerate(eva_list):
+                    #print(f[i],n)
+
+                    def func(xy):
+                        # function to minimize globally
+                        xy = clip(xy,bmin,bmax)
+                        r0 = env._r(xy[:,newaxis])
+                        rm = env._r(xy[:,newaxis],mpos)
+                        return -beamformerFreq(steer_type,
+                                                self.r_diag,
+                                                1.0,
+                                                (r0, rm, k),
+                                                (ones(1), eve[:,n:n+1]))[0][0]
+
+                    # simplical global homotopy optimizer
+                    oR = shgo(func,self.bounds,**shgo_opts)
+                    # index in grid
+                    ind = i*self.n+j 
+                    # store result for position
+                    self._gpos[:,ind] = oR['x']
+                    # store result for level
+                    ac[i,ind] = eva[n]/numchannels
+                    #print(oR['x'],eva[n]/numchannels,oR)
+                fr[i] = 1
+
 
 def L_p ( x ):
     """
@@ -2451,7 +2667,7 @@ def integrate(data, grid, sector):
     Parameters
     ----------
     data: array of floats
-        Contains the calculated sound pressures in Pa.        
+        Contains the calculated squared sound pressure values in Pa**2.        
         If data has the same number of entries than the number of grid points
         only one value is returned.
         In case of a 2-D array with the second dimension identical 

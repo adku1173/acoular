@@ -20,7 +20,8 @@ from acoular import Calib, MicGeom, PowerSpectra, \
 RectGrid, BeamformerBase, BeamformerEig, BeamformerOrth, BeamformerCleansc, \
 MaskedTimeSamples, BeamformerCMF, \
 BeamformerCapon, BeamformerMusic, BeamformerDamas, BeamformerClean, \
-BeamformerFunctional, BeamformerDamasPlus, BeamformerGIB, SteeringVector,Environment
+BeamformerFunctional, BeamformerDamasPlus, BeamformerGIB, BeamformerGridlessOrth,\
+SteeringVector, Environment
 
 # if this flag is set to True
 WRITE_NEW_REFERENCE_DATA = False
@@ -52,7 +53,7 @@ env=Environment(c=346.04)
 st = SteeringVector(grid=g, mics=m, env=env)
 f = PowerSpectra(time_data=t1, 
                window='Hanning', overlap='50%', block_size=128, #FFT-parameters
-               cached = False )  #cached = False
+               cached = False )  
 
 # produces a tuple of beamformer objects to test
 # because we need new objects for each test we have to call this more than once
@@ -73,7 +74,8 @@ def fbeamformers():
     bl = BeamformerClean(beamformer=bb, n_iter=10, cached = False)
     bf = BeamformerFunctional(freq_data=f, steer=st, r_diag=False, gamma=3, cached = False)
     bgib = BeamformerGIB(freq_data=f, steer=st, method= 'LassoLars', n=2, cached = False)
-    return (bbase, bc, beig, bm, bl, bo, bs, bd, bcmf, bf, bdp, bgib)
+    bgo = BeamformerGridlessOrth(freq_data=f, steer=st, r_diag=False, n=1,  shgo={'n':16}, cached = False)
+    return (bbase, bc, beig, bm, bl, bo, bs, bd, bcmf, bf, bdp, bgib, bgo)
 
 class acoular_beamformer_test(unittest.TestCase):
 
@@ -93,7 +95,7 @@ class acoular_beamformer_test(unittest.TestCase):
         acoular.config.global_caching = 'individual'
         for b in fbeamformers():
             b.cached = True
-            with self.subTest(b.__class__.__name__+" global_caching = none"):
+            with self.subTest(b.__class__.__name__+" global_caching = individual"):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
                 actual_data = np.array([b.synthetic(cf,1) for cf in cfreqs],dtype=np.float32)
                 ref_data = np.load(name)
@@ -102,7 +104,7 @@ class acoular_beamformer_test(unittest.TestCase):
         acoular.config.global_caching = 'all'
         for b in fbeamformers():
             b.cached = True
-            with self.subTest(b.__class__.__name__+" global_caching = none"):
+            with self.subTest(b.__class__.__name__+" global_caching = all"):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
                 actual_data = np.array([b.synthetic(cf,1) for cf in cfreqs],dtype=np.float32)
                 ref_data = np.load(name)
@@ -148,6 +150,29 @@ class acoular_beamformer_test(unittest.TestCase):
             b0 = BeamformerBase(freq_data=f, steer=st, r_diag=True, cached = True)
             b1 = BeamformerBase(freq_data=f, steer=st, r_diag=True, cached = True)
             self.assertEqual(id(b0.result),id(b1.result))
+
+class Test_PowerSpectra(unittest.TestCase):
+
+    def test_csm(self):
+        """ test that csm result has not changed over different releases"""
+        name = join('reference_data',f'{f.__class__.__name__}_csm.npy')
+        # test only two frequencies
+        actual_data = np.array(f.csm[(16,32),:,:],dtype=np.complex64)
+        if WRITE_NEW_REFERENCE_DATA:
+            np.save(name,actual_data)
+        ref_data = np.load(name)
+        np.testing.assert_allclose(actual_data, ref_data, rtol=1e-5, atol=1e-8)
+
+    def test_ev(self):
+        """ test that eve and eva result has not changed over different releases"""
+        name = join('reference_data',f'{f.__class__.__name__}_ev.npy')
+        # test only two frequencies
+        actual_data = np.array((f.eve*f.eva[:,:,np.newaxis])[(16,32),:,:],dtype=np.complex64)
+        if WRITE_NEW_REFERENCE_DATA:
+            np.save(name,actual_data)
+        ref_data = np.load(name)
+        np.testing.assert_allclose(actual_data, ref_data, rtol=1e-5, atol=1e-8)
+
 
 if __name__ == '__main__':
     unittest.main() #exit=False

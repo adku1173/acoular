@@ -36,17 +36,17 @@ SampleSplitter, AngleTracker, SpatialInterpolatorConstantRotation, Filter, \
 TimeExpAverage, FiltFreqWeight, TimeCumAverage, FilterBank, OctaveFilterBank, TimeConvolve
 from .calib import Calib
 from .trajectory import Trajectory
-from .grids import Grid, RectGrid, RectGrid3D, Sector,RectSector,CircSector,\
+from .grids import Grid, RectGrid, RectGrid3D, Sector, RectSector, RectSector3D, CircSector,\
     PolySector, MultiSector, MergeGrid, LineGrid, ImportGrid, ConvexSector
 from .environments import cartToCyl, cylToCart, Environment, UniformFlowEnvironment, RotatingFlow, \
 FlowField, OpenJet, SlotJet, GeneralFlowEnvironment
 from .microphones import MicGeom
-from .spectra import PowerSpectra, PowerSpectra as EigSpectra, synthetic
+from .spectra import BaseSpectra, FFTSpectra, PowerSpectra, PowerSpectraImport, PowerSpectra as EigSpectra, synthetic
 
 from .fbeamform import BeamformerBase, BeamformerCapon, BeamformerEig, \
 BeamformerMusic, BeamformerDamas, BeamformerDamasPlus, BeamformerOrth,BeamformerCleansc, \
 BeamformerCMF,BeamformerSODIX, BeamformerClean, BeamformerFunctional, BeamformerGIB, L_p, integrate, \
-PointSpreadFunction, SteeringVector
+PointSpreadFunction, SteeringVector, BeamformerAdaptiveGrid, BeamformerGridlessOrth
 
 from .sources import PointSource, MovingPointSource, \
 TimeSamples, MaskedTimeSamples, PointSourceDipole, UncorrelatedNoiseSource, \
