@@ -33,9 +33,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install .
         python -c 'import acoular'
-        python -c 'import numpy; print(numpy.__version__)'
     - name: Test with unittest *nix
       run: |
+        echo "${sw_vers}"
         chmod +x ../acoular/acoular/tests/run_tests.sh
         cd ../acoular/acoular/tests/
         bash run_tests.sh
