@@ -8,10 +8,7 @@ on:
   pull_request:
     branches: [ master ]
   workflow_dispatch:
-    tags:
-      description: 'Test tests'
-      required: false
-      type: boolean    
+    
               
 
 jobs:
