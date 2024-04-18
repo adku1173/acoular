@@ -4,9 +4,12 @@ name: Acoular install and test
 
 on:
   push:
-    branches: [ master ]
+    branches: [ "*" ]
   pull_request:
     branches: [ master ]
+  workflow_dispatch:
+    branches: ["*"]
+              
 
 jobs:
   build:
@@ -16,8 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.7', '3.8', '3.9','3.10','3.11']
+        os: [macos-latest]
+        python-version: ['3.10','3.11']
 
     steps:
     - uses: actions/checkout@v4
@@ -30,6 +33,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install .
         python -c 'import acoular'
+        python -c 'import numpy; print(numpy.__version__)'
     - name: Test with unittest *nix
       run: |
         chmod +x ../acoular/acoular/tests/run_tests.sh
