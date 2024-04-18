@@ -35,7 +35,7 @@ jobs:
         python -c 'import acoular'
     - name: Test with unittest *nix
       run: |
-        echo "${sw_vers}"
+        echo `sw_vers`
         chmod +x ../acoular/acoular/tests/run_tests.sh
         cd ../acoular/acoular/tests/
         bash run_tests.sh
