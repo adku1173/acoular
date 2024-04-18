@@ -37,6 +37,7 @@ jobs:
       run: |
         echo `sw_vers`
         uname -p
+        python -V
         chmod +x ../acoular/acoular/tests/run_tests.sh
         cd ../acoular/acoular/tests/
         bash run_tests.sh
