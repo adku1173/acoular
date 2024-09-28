@@ -112,7 +112,7 @@ from .configuration import config
 from .environments import Environment
 from .fastFuncs import beamformerFreq, calcPointSpreadFunction, calcTransfer, damasSolverGaussSeidel
 from .grids import Grid, Sector
-from .h5cache import H5cache
+from .h5cache import cached_file
 from .h5files import H5CacheFileBase
 from .internal import digest
 from .microphones import MicGeom
@@ -290,7 +290,7 @@ class LazyBfResult:
         return self.bf._ac.__getitem__(key)
 
 
-class BeamformerBase(HasPrivateTraits):
+class BeamformerBase(CacheObject):
     """Beamforming using the basic delay-and-sum algorithm in the frequency domain."""
 
     # Instance of :class:`~acoular.fbeamform.SteeringVector` or its derived classes
@@ -457,56 +457,6 @@ class BeamformerBase(HasPrivateTraits):
     def _get_digest(self):
         return digest(self)
 
-    def _get_filecache(self):
-        """Function collects cached results from file depending on
-        global/local caching behaviour. Returns (None, None) if no cachefile/data
-        exist and global caching mode is 'readonly'.
-        """
-        #        print("get cachefile:", self.freq_data.basename)
-        H5cache.get_cache_file(self, self.freq_data.basename)
-        if not self.h5f:
-            #            print("no cachefile:", self.freq_data.basename)
-            return (None, None, None)  # only happens in case of global caching readonly
-
-        nodename = self.__class__.__name__ + self.digest
-        #        print("collect filecache for nodename:",nodename)
-        if config.global_caching == 'overwrite' and self.h5f.is_cached(nodename):
-            #            print("remove existing data for nodename",nodename)
-            self.h5f.remove_data(nodename)  # remove old data before writing in overwrite mode
-
-        if not self.h5f.is_cached(nodename):
-            #            print("no data existent for nodename:", nodename)
-            if config.global_caching == 'readonly':
-                return (None, None, None)
-            numfreq = self.freq_data.fftfreq().shape[0]  # block_size/2 + 1steer_obj
-            group = self.h5f.create_new_group(nodename)
-            self.h5f.create_compressible_array(
-                'freqs',
-                (numfreq,),
-                'int8',  #'bool',
-                group,
-            )
-            if isinstance(self, BeamformerAdaptiveGrid):
-                self.h5f.create_compressible_array('gpos', (3, self.size), 'float64', group)
-                self.h5f.create_compressible_array('result', (numfreq, self.size), self.precision, group)
-            elif isinstance(self, BeamformerSODIX):
-                self.h5f.create_compressible_array(
-                    'result',
-                    (numfreq, self.steer.grid.size * self.steer.mics.num_mics),
-                    self.precision,
-                    group,
-                )
-            else:
-                self.h5f.create_compressible_array('result', (numfreq, self.steer.grid.size), self.precision, group)
-
-        ac = self.h5f.get_data_by_reference('result', '/' + nodename)
-        fr = self.h5f.get_data_by_reference('freqs', '/' + nodename)
-        if isinstance(self, BeamformerAdaptiveGrid):
-            gpos = self.h5f.get_data_by_reference('gpos', '/' + nodename)
-        else:
-            gpos = None
-        return (ac, fr, gpos)
-
     def _assert_equal_channels(self):
         numchannels = self.freq_data.numchannels
         if numchannels != self.steer.mics.num_mics or numchannels == 0:
@@ -514,35 +464,11 @@ class BeamformerBase(HasPrivateTraits):
 
     @property_depends_on('digest')
     def _get_result(self):
-        """Implements the :attr:`result` getter routine.
-        The beamforming result is either loaded or calculated.
-        """
-        # store locally for performance
+        """Computes the beamforming result if not cached."""
         self._f = self.freq_data.fftfreq()
         self._numfreq = self._f.shape[0]
         self._assert_equal_channels()
-        ac, fr = (None, None)
-        if not (  # if result caching is active
-            config.global_caching == 'none' or (config.global_caching == 'individual' and not self.cached)
-        ):
-            (ac, fr, gpos) = self._get_filecache()  # can also be (None, None, None)
-            if gpos:  # we have an adaptive grid
-                self._gpos = gpos
-        if ac and fr:  # cached data is available
-            if config.global_caching == 'readonly':
-                (ac, fr) = (ac[:], fr[:])  # so never write back to disk
-        else:
-            # no caching or not activated, init numpy arrays
-            if isinstance(self, BeamformerAdaptiveGrid):
-                self._gpos = zeros((3, self.size), dtype=self.precision)
-                ac = zeros((self._numfreq, self.size), dtype=self.precision)
-            elif isinstance(self, BeamformerSODIX):
-                ac = zeros((self._numfreq, self.steer.grid.size * self.steer.mics.num_mics), dtype=self.precision)
-            else:
-                ac = zeros((self._numfreq, self.steer.grid.size), dtype=self.precision)
-            fr = zeros(self._numfreq, dtype='int8')
-        self._ac = ac
-        self._fr = fr
+        self._ac, self._fr = self.handle_cache()
         return LazyBfResult(self)
 
     def sig_loss_norm(self):
@@ -1053,7 +979,7 @@ class BeamformerMusic(BeamformerEig):
             self._fr[i] = 1
 
 
-class PointSpreadFunction(HasPrivateTraits):
+class PointSpreadFunction(CacheObject):
     """The point spread function.
 
     This class provides tools to calculate the PSF depending on the used
@@ -1251,7 +1177,24 @@ class PointSpreadFunction(HasPrivateTraits):
             )
         ac = self.h5f.get_data_by_reference('result', '/' + nodename)
         gp = self.h5f.get_data_by_reference('gridpts', '/' + nodename)
-        return (ac, gp)
+        if ac and gp:
+            #                print("cached data existent")
+            if not gp[:][self.grid_indices].all():
+                #                    print("calculate missing results")
+                if self.calcmode == 'readonly':
+                    msg = "Cannot calculate missing PSF (points) in 'readonly' mode."
+                    raise ValueError(msg)
+                if config.global_caching == 'readonly':
+                    (ac, gp) = (ac[:], gp[:])
+                    self.calc_psf()
+                    return ac[:, self.grid_indices]
+                self.calc_psf()
+                self.h5f.flush()
+                return ac[:, self.grid_indices]
+            #                else:
+            #                    print("cached results are complete! return.")
+            return ac[:, self.grid_indices]
+        return (None, None)
 
     def _get_psf(self):
         """Implements the :attr:`psf` getter routine.
@@ -1264,35 +1207,14 @@ class PointSpreadFunction(HasPrivateTraits):
         if config.global_caching != 'none':
             #            print("get filecache..")
             (ac, gp) = self._get_filecache()
-            if ac and gp:
-                #                print("cached data existent")
-                if not gp[:][self.grid_indices].all():
-                    #                    print("calculate missing results")
-                    if self.calcmode == 'readonly':
-                        msg = "Cannot calculate missing PSF (points) in 'readonly' mode."
-                        raise ValueError(msg)
-                    if config.global_caching == 'readonly':
-                        (ac, gp) = (ac[:], gp[:])
-                        self.calc_psf(ac, gp)
-                        return ac[:, self.grid_indices]
-                    self.calc_psf(ac, gp)
-                    self.h5f.flush()
-                    return ac[:, self.grid_indices]
-                #                else:
-                #                    print("cached results are complete! return.")
-                return ac[:, self.grid_indices]
-            #           print("no caching, calculate result")
-            ac = zeros((gs, gs), dtype=self.precision)
-            gp = zeros((gs,), dtype='int8')
-            self.calc_psf(ac, gp)
-        else:  # no caching activated
+        if self._ac is None and self._gp is None:  # no caching activated
             #            print("no caching activated, calculate result")
-            ac = zeros((gs, gs), dtype=self.precision)
-            gp = zeros((gs,), dtype='int8')
-            self.calc_psf(ac, gp)
-        return ac[:, self.grid_indices]
+            self._ac = zeros((gs, gs), dtype=self.precision)
+            self._gp = zeros((gs,), dtype='int8')
+        self.calc_psf()
+        return self._ac[:, self.grid_indices]
 
-    def calc_psf(self, ac, gp):
+    def calc_psf(self):
         """point-spread function calculation."""
         if self.calcmode != 'full':
             # calc_ind has the form [True, True, False, True], except
@@ -1304,16 +1226,16 @@ class PointSpreadFunction(HasPrivateTraits):
 
         if self.calcmode == 'single':  # calculate selected psfs one-by-one
             for ind in g_ind_calc:
-                ac[:, ind] = self._psf_call([ind])[:, 0]
-                gp[ind] = 1
+                self._ac[:, ind] = self._psf_call([ind])[:, 0]
+                self._gp[ind] = 1
         elif self.calcmode == 'full':  # calculate all psfs in one go
-            gp[:] = 1
-            ac[:] = self._psf_call(arange(self.steer.grid.size))
+            self._gp[:] = 1
+            self._ac[:] = self._psf_call(arange(self.steer.grid.size))
         else:  # 'block' # calculate selected psfs in one go
             hh = self._psf_call(g_ind_calc)
             for indh, ind in enumerate(g_ind_calc):
-                gp[ind] = 1
-                ac[:, ind] = hh[:, indh]
+                self._gp[ind] = 1
+                self._ac[:, ind] = hh[:, indh]
                 indh += 1
 
     def _psf_call(self, ind):

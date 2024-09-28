@@ -212,6 +212,12 @@ class Config(HasStrictTraits):
     def _get_have_traitsui(self):
         return self._have_module('traitsui')
 
+    def clear_cache_dir(self):
+        """Clears the cache directory."""
+        from shutil import rmtree
+
+        rmtree(self.cache_dir)
+
 
 config = Config()
 """
