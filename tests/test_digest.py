@@ -1,5 +1,5 @@
-from unittest import TestCase
-
+"""Test that ensures that digest of Acoular classes changes correctly on changes of CArray and List attributes."""
+import pytest
 from acoular import (
     BeamformerCleantSqTraj,
     BeamformerCleantTraj,
@@ -150,46 +150,33 @@ UNEQUAL_DIGEST_TEST_DICT = {
     'WriteWAV.channels list assignment': (WriteWAV(), 'obj.channels = [0]'),
 }
 
+def get_digests(obj, statement):
+    """A function that collects the digest of the obj before (d1) and
+    after (d2) executing the statement that should yield to a change
+    of the object digest.
 
-class Test_DigestChange(TestCase):
-    """Test that ensures that digest of Acoular classes changes correctly on
-    changes of CArray and List attributes.
+    Parameters
+    ----------
+    obj : instance
+        class instance that has an attribute `digest`
+    statement : "str"
+        a string that can be executed
+
+    Returns
+    -------
+    str, str
+        digest before and after statement execution
+
     """
+    d1 = obj.digest
+    exec(statement)
+    d2 = obj.digest
+    return d1, d2
 
-    def get_digests(self, obj, statement):
-        """A function that collects the digest of the obj before (d1) and
-        after (d2) executing the statement that should yield to a change
-        of the object digest.
+@pytest.mark.parametrize("test_label, value", list(UNEQUAL_DIGEST_TEST_DICT.items()))
+def test_digest_changes_on_assignment(test_label, value): # noqa: ARG001
+    """test that object digest change on statement execution."""
+    obj, statement = value
+    digest_before_statement, digest_after_statement = get_digests(obj, statement)
+    assert digest_before_statement != digest_after_statement
 
-        Parameters
-        ----------
-        obj : instance
-            class instance that has an attribute `digest`
-        statement : "str"
-            a string that can be executed
-
-        Returns
-        -------
-        str, str
-            digest before and after statement execution
-
-        """
-        d1 = obj.digest
-        exec(statement)
-        d2 = obj.digest
-        return d1, d2
-
-    def test_digest_changes_on_assignment(self):
-        """test that object digest change on statement execution."""
-        for test_label, (obj, statement) in UNEQUAL_DIGEST_TEST_DICT.items():
-            # use subtest to get individual test result.
-            # tests will not stop if one subtest fails!
-            with self.subTest(test_label):
-                digest_before_statement, digest_after_statement = self.get_digests(obj, statement)
-                self.assertNotEqual(digest_before_statement, digest_after_statement)
-
-
-if __name__ == '__main__':
-    import unittest
-
-    unittest.main()

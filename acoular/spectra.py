@@ -55,10 +55,8 @@ from traits.api import (
 )
 
 from .calib import Calib
-from .configuration import config
 from .fastFuncs import calcCSM
-from .h5cache import H5cache
-from .h5files import H5CacheFileBase
+from .h5cache import CacheInterface
 from .internal import digest
 from .tprocess import SamplesGenerator, TimeInOut
 
@@ -182,7 +180,7 @@ class FFTSpectra(BaseSpectra, TimeInOut):
             yield ft
 
 
-class PowerSpectra(BaseSpectra):
+class PowerSpectra(BaseSpectra, CacheInterface):
     """Provides the cross spectral matrix of multichannel time data
      and its eigen-decomposition.
 
@@ -247,10 +245,6 @@ class PowerSpectra(BaseSpectra):
     # the freq_range interval.
     _index_set_last = Bool(True)
 
-    #: Flag, if true (default), the result is cached in h5 files and need not
-    #: to be recomputed during subsequent program runs.
-    cached = Bool(True, desc='cached flag')
-
     #: Number of FFT blocks to average, readonly
     #: (set from block_size and overlap).
     num_blocks = Property(desc='overall number of FFT blocks')
@@ -286,13 +280,12 @@ class PowerSpectra(BaseSpectra):
     #: readonly.
     eve = Property(desc='eigenvectors of cross spectral matrix')
 
+    _ev = Property(desc='internal storage for eigenvalues and eigenvectors')
+
     # internal identifier
     digest = Property(
         depends_on=['_source.digest', 'calib.digest', 'block_size', 'window', 'overlap', 'precision'],
     )
-
-    # hdf5 cache file
-    h5f = Instance(H5CacheFileBase, transient=True)
 
     def _get_calib(self):
         return self._calib
@@ -395,53 +388,23 @@ class PowerSpectra(BaseSpectra):
         return self._source.__class__.__name__ + self._source.digest
 
     def calc_csm(self):
-        """Csm calculation."""
-        t = self.source
+        """CSM calculation."""
         wind = self.window_(self.block_size)
         weight = dot(wind, wind)
         wind = wind[newaxis, :].swapaxes(0, 1)
-        numfreq = int(self.block_size / 2 + 1)
-        csm_shape = (numfreq, t.numchannels, t.numchannels)
-        csm_upper = zeros(csm_shape, dtype=self.precision)
-        # print "num blocks", self.num_blocks
-        # for backward compatibility
         if self.calib and self.calib.num_mics > 0:
-            if self.calib.num_mics == t.numchannels:
-                wind = wind * self.calib.data[newaxis, :]
-            else:
-                raise ValueError('Calibration data not compatible: %i, %i' % (self.calib.num_mics, t.numchannels))
+            wind = wind * self.calib.data[newaxis, :]
         # get time data blockwise
+        csm_upper = zeros(self._csm.shape, dtype=self._csm.dtype)
         for data in self.get_source_data():
             ft = fft.rfft(data * wind, None, 0).astype(self.precision)
             calcCSM(csm_upper, ft)  # only upper triangular part of matrix is calculated (for speed reasons)
         # create the full csm matrix via transposing and complex conj.
         csm_lower = csm_upper.conj().transpose(0, 2, 1)
         [fill_diagonal(csm_lower[cntFreq, :, :], 0) for cntFreq in range(csm_lower.shape[0])]
-        csm = csm_lower + csm_upper
+        self._csm[:,:,:] = csm_lower + csm_upper
         # onesided spectrum: multiplication by 2.0=sqrt(2)^2
-        return csm * (2.0 / self.block_size / weight / self.num_blocks)
-
-    def calc_ev(self):
-        """Eigenvalues / eigenvectors calculation."""
-        if self.precision == 'complex128':
-            eva_dtype = 'float64'
-        elif self.precision == 'complex64':
-            eva_dtype = 'float32'
-        #        csm = self.csm #trigger calculation
-        csm_shape = self.csm.shape
-        eva = empty(csm_shape[0:2], dtype=eva_dtype)
-        eve = empty(csm_shape, dtype=self.precision)
-        for i in range(csm_shape[0]):
-            (eva[i], eve[i]) = linalg.eigh(self.csm[i])
-        return (eva, eve)
-
-    def calc_eva(self):
-        """Calculates eigenvalues of csm."""
-        return self.calc_ev()[0]
-
-    def calc_eve(self):
-        """Calculates eigenvectors of csm."""
-        return self.calc_ev()[1]
+        self._csm[:,:,:] *= (2.0 / self.block_size / weight / self.num_blocks)
 
     def _handle_dual_calibration(self):
         obj = self.source  # start with time_data obj
@@ -460,48 +423,50 @@ class PowerSpectra(BaseSpectra):
                 except AttributeError:
                     obj = None
 
-    def _get_filecache(self, traitname):
-        """Function handles result caching of csm, eigenvectors and eigenvalues
-        calculation depending on global/local caching behaviour.
-        """
-        if traitname == 'csm':
-            func = self.calc_csm
-            numfreq = int(self.block_size / 2 + 1)
-            shape = (numfreq, self._source.numchannels, self._source.numchannels)
-            precision = self.precision
-        elif traitname == 'eva':
-            func = self.calc_eva
-            shape = self.csm.shape[0:2]
-            if self.precision == 'complex128':
-                precision = 'float64'
-            elif self.precision == 'complex64':
-                precision = 'float32'
-        elif traitname == 'eve':
-            func = self.calc_eve
-            shape = self.csm.shape
-            precision = self.precision
+    def _validate_calibration(self):
+        if self.calib and self.calib.num_mics > 0 and self.calib.num_mics != self.source.numchannels:
+            msg = f'Calibration data not compatible: {self.calib.num_mics}, {self.source.numchannels}'
+            raise ValueError(msg)
+        self._handle_dual_calibration()
 
-        H5cache.get_cache_file(self, self.basename)
-        if not self.h5f:  # in case of global caching readonly
-            return func()
+    def _get_default_node_name(self):
+        if self._default_node_name:
+            return self._default_node_name
+        return self.digest
 
-        nodename = traitname + '_' + self.digest
-        if config.global_caching == 'overwrite' and self.h5f.is_cached(nodename):
-            # print("remove existing node",nodename)
-            self.h5f.remove_data(nodename)  # remove old data before writing in overwrite mode
+    def _real_dtype(self):
+        if self.precision == 'complex128':
+            return 'float64'
+        return 'float32'
 
-        if not self.h5f.is_cached(nodename):
-            if config.global_caching == 'readonly':
-                return func()
-            #            print("create array, data not cached for",nodename)
-            self.h5f.create_compressible_array(nodename, shape, precision)
+    def is_cached(self, traitname): # noqa ARG002
+        return self.h5f.is_cached(traitname + '_' + self.default_node_name)
 
-        ac = self.h5f.get_data_by_reference(nodename)
-        if ac[:].sum() == 0:  # only initialized
-            #            print("write {} to:".format(traitname),nodename)
-            ac[:] = func()
-            self.h5f.flush()
-        return ac
+    def remove_cache(self, traitname): # noqa ARG002
+        if self.h5f:
+            self.h5f.remove_data(traitname + '_' + self.default_node_name)
+
+    def init_no_cache(self, traitname):
+        nfreq = int(self.block_size / 2 + 1)
+        nc = self.source.numchannels
+        if traitname == 'csm' or traitname == 'eve':
+            arr = empty((nfreq,nc,nc), dtype=self.precision)
+        if traitname == 'eva':
+            arr = empty((nfreq,nc), dtype=self._real_dtype())
+        return arr
+
+    def init_cache(self, traitname):
+        nfreq = int(self.block_size / 2 + 1)
+        nc = self.source.numchannels
+        node_name = traitname + '_' + self.default_node_name
+        if traitname == 'csm' or traitname == 'eve':
+            self.h5f.create_compressible_array(node_name, (nfreq, nc, nc), self.precision)
+        if traitname == 'eva':
+            self.h5f.create_compressible_array(node_name, (nfreq, nc), self._real_dtype())
+
+    def get_cache(self, traitname):
+        node_name = traitname + '_' + self.default_node_name
+        return self.h5f.get_data_by_reference(node_name)
 
     @property_depends_on('digest')
     def _get_csm(self):
@@ -509,28 +474,42 @@ class PowerSpectra(BaseSpectra):
         Cross spectral matrix is either loaded from cache file or
         calculated and then additionally stored into cache.
         """
-        self._handle_dual_calibration()
-        if config.global_caching == 'none' or (config.global_caching == 'individual' and self.cached is False):
-            return self.calc_csm()
-        return self._get_filecache('csm')
+        self._validate_calibration()
+        self._csm, is_cached = self.handle_cache(traitname='csm')
+        if not is_cached:
+            self.calc_csm()
+        if self.h5f:
+            self.h5f.flush()
+        return self._csm
+
+    @property_depends_on('digest')
+    def _get__ev(self):
+        """Eigenvalues / eigenvectors calculation."""
+        return linalg.eigh(self.csm)
 
     @property_depends_on('digest')
     def _get_eva(self):
         """Eigenvalues of cross spectral matrix are either loaded from cache file or
         calculated and then additionally stored into cache.
         """
-        if config.global_caching == 'none' or (config.global_caching == 'individual' and self.cached is False):
-            return self.calc_eva()
-        return self._get_filecache('eva')
+        self._eva, is_cached = self.handle_cache(traitname='eva')
+        if not is_cached:
+            self._eva[:,:] = self._ev[0]
+        if self.h5f:
+            self.h5f.flush()
+        return self._eva
 
     @property_depends_on('digest')
     def _get_eve(self):
         """Eigenvectors of cross spectral matrix are either loaded from cache file or
         calculated and then additionally stored into cache.
         """
-        if config.global_caching == 'none' or (config.global_caching == 'individual' and self.cached is False):
-            return self.calc_eve()
-        return self._get_filecache('eve')
+        self._eve, is_cached = self.handle_cache(traitname='eve')
+        if not is_cached:
+            self._eve[:,:,:] = self._ev[1]
+        if self.h5f:
+            self.h5f.flush()
+        return self._eve
 
     def synthetic_ev(self, freq, num=0):
         """Return synthesized frequency band values of the eigenvalues.
@@ -760,14 +739,14 @@ class PowerSpectraImport(PowerSpectra):
         """Eigenvalues of cross spectral matrix are either loaded from cache file or
         calculated and then additionally stored into cache.
         """
-        return self.calc_eva()
+        return self.eva()
 
     @property_depends_on('digest')
     def _get_eve(self):
         """Eigenvectors of cross spectral matrix are either loaded from cache file or
         calculated and then additionally stored into cache.
         """
-        return self.calc_eve()
+        return self.eve()
 
     def fftfreq(self):
         """Return the Discrete Fourier Transform sample frequencies.

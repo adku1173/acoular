@@ -4,26 +4,109 @@
 
 # imports from other packages
 import gc
-from functools import wraps
 from os import listdir, path
 from weakref import WeakValueDictionary
 
-import numpy as np
-from traits.api import Bool, Delegate, Dict, HasPrivateTraits, Instance
+from traits.api import Bool, Delegate, Dict, HasPrivateTraits, Instance, Property, Str, Union
 
 from .configuration import Config, config
-from .fbeamform import BeamformerAdaptiveGrid, BeamformerBase, BeamformerSODIX, PointSpreadFunction
-from .h5files import _get_cachefile_class
+from .h5files import H5CacheFileBase, _get_cachefile_class
 
 
-def cached_file(func):
-    """Decorator that handles cache loading and storing results in the cache."""
-    @wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if isinstance(self, BeamformerBase):
-            H5cache._get_bf_filecache(self)
-        return func(self, *args, **kwargs)
-    return wrapper
+class CacheInterface(HasPrivateTraits):
+
+    #: flag to enable/disable caching
+    cached = Bool(True, desc='flag to enable/disable caching')
+
+    #: file object containing the cached data
+    h5f = Instance(H5CacheFileBase, transient=True, desc='HDF5 file object')
+
+    #: default name of the cache file (should be overwritten by subclasses)
+    default_cache_name = Property(desc='default name of the cache file')
+
+    #: default name of the cache node
+    default_node_name = Property(desc='default name of the cache node')
+
+    _default_cache_name = Union(Str, None, default_value=None)
+
+    _default_node_name = Union(Str, None, default_value=None)
+
+    def init_cache(self, **kwargs):
+        msg = 'Method init_no_cache must be implemented by subclass'
+        raise NotImplementedError(msg)
+        return kwargs
+
+    def init_no_cache(self, **kwargs):
+        msg = 'Method init_no_cache must be implemented by subclass'
+        raise NotImplementedError(msg)
+        return kwargs
+
+    def get_cache(self, **kwargs):
+        msg = 'Method init_no_cache must be implemented by subclass'
+        raise NotImplementedError(msg)
+        return kwargs
+
+    def is_cached(self, **kwargs): # noqa ARG002
+        return self.h5f.is_cached(self.default_node_name)
+
+    def remove_cache(self, **kwargs): # noqa ARG002
+        if self.h5f:
+            self.h5f.remove_data(self.default_node_name)
+
+    def _get_default_cache_name(self):
+        if self._default_cache_name:
+            return self._default_cache_name
+        return self.basename  + '_cache.h5'
+
+    def _set_default_cache_name(self, name):
+        self._default_cache_name = name
+
+    def _get_default_node_name(self):
+        if self._default_node_name:
+            return self._default_node_name
+        return self.__class__.__name__ + self.digest
+
+    def _set_default_node_name(self, name):
+        self._default_node_name = name
+
+
+    def handle_cache(self, **kwargs):
+        """Handles caching of data.
+
+        Parameters
+        ----------
+        kwargs : dict
+            Keyword arguments to be passed to the methods responsible for
+            allocation and cache handling.
+
+        Returns
+        -------
+        data : array
+            The data array.
+        is_cached : bool
+            Flag indicating whether the data is cached.
+
+        """
+        status = config.global_caching
+        H5cache.get_cache_file(self, self.default_cache_name)
+        if not self.h5f:
+            return self.init_no_cache(**kwargs), False
+        # remove old data before writing in overwrite mode
+        is_cached = self.is_cached(**kwargs)
+        if status == 'overwrite' and is_cached:
+            self.remove_cache(**kwargs)
+            is_cached = False
+        if not is_cached and status != 'readonly':
+            self.init_cache(**kwargs)
+            return self.get_cache(**kwargs), is_cached
+        if status == 'readonly':
+            cache = self.get_cache(**kwargs)
+            if isinstance(cache, tuple):
+                # construct tuple with copied data
+                return tuple(data[:] for data in cache), is_cached
+            return cache[:], is_cached
+        return self.get_cache(**kwargs), is_cached
+
 
 
 class HDF5Cache(HasPrivateTraits):
@@ -96,12 +179,17 @@ class HDF5Cache(HasPrivateTraits):
     def _print_open_files(self):
         print(list(self.open_file_reference.items()))
 
-    def get_cache_file(self, obj, basename, mode='a'):
+    def get_cache_file(self, obj, filename, mode='a'):
         """Returns pytables .h5 file to h5f trait of calling object for caching."""
+        if config.global_caching == 'none' or (
+            config.global_caching == 'individual' and not obj.cached
+        ):
+            obj.h5f = None
+            return
+
         self._idle_if_busy()  #
         self.busy = True
 
-        filename = basename + '_cache.h5'
         obj_filename = self.get_filename(obj.h5f)
 
         if obj_filename:
@@ -133,144 +221,7 @@ class HDF5Cache(HasPrivateTraits):
         self._print_open_files()
 
 
-    @staticmethod
-    def _get_bf_filecache(bf):
-        """Function collects cached results from file depending on
-        global/local caching behaviour. Returns (None, None) if no cachefile/data
-        exist and global caching mode is 'readonly'.
-        """
-        nodename = bf.__class__.__name__ + bf.digest
-
-        if not (  # if result caching is active
-            config.global_caching == 'none' or (config.global_caching == 'individual' and not bf.cached)
-        ):
-            H5cache.get_cache_file(bf, bf.freq_data.basename)
-            if not bf.h5f or (config.global_caching == 'readonly' and not bf.h5f.is_cached(nodename)):
-                bf._ac = None
-                bf._fr = None
-                return
-            #        print("collect filecache for nodename:",nodename)
-            if config.global_caching == 'overwrite' and bf.h5f.is_cached(nodename):
-                #            print("remove existing data for nodename",nodename)
-                bf.h5f.remove_data(nodename)  # remove old data before writing in overwrite mode
-
-            if not bf.h5f.is_cached(nodename):
-                #            print("no data existent for nodename:", nodename)
-                numfreq = bf.freq_data.fftfreq().shape[0]  # block_size/2 + 1steer_obj
-                group = bf.h5f.create_new_group(nodename)
-                bf.h5f.create_compressible_array(
-                    'freqs',
-                    (numfreq,),
-                    'int8',  #'bool',
-                    group,
-                )
-                if isinstance(bf, BeamformerAdaptiveGrid):
-                    bf.h5f.create_compressible_array('gpos', (3, bf.size), 'float64', group)
-                    bf.h5f.create_compressible_array('result', (numfreq, bf.size), bf.precision, group)
-                elif isinstance(bf, BeamformerSODIX):
-                    bf.h5f.create_compressible_array(
-                        'result',
-                        (numfreq, bf.steer.grid.size * bf.steer.mics.num_mics),
-                        bf.precision,
-                        group,
-                    )
-                else:
-                    bf.h5f.create_compressible_array('result', (numfreq, bf.steer.grid.size), bf.precision, group)
-
-            ac = bf.h5f.get_data_by_reference('result', '/' + nodename)
-            fr = bf.h5f.get_data_by_reference('freqs', '/' + nodename)
-            gpos = bf.h5f.get_data_by_reference('gpos', '/' + nodename) if isinstance(bf, BeamformerAdaptiveGrid) else None
-            if gpos:
-                bf._gpos = gpos
-        if (ac and fr) and config.global_caching == 'readonly':
-            (ac, fr) = (ac[:], fr[:])  # so never write back to disk
-        bf._ac = ac
-        bf._fr = fr
-        return
-
-
-
 H5cache = HDF5Cache(config=config)
-
-class CacheObject(HasPrivateTraits):
-
-    cached = Bool(True)
-
-    # hdf5 cache file
-    h5f = Instance(H5CacheFileBase, transient=True) # TODO: make this private?
-
-    _cache_filename = Property()
-
-    _nodename = Property()
-
-    def _get__nodename(self):
-        if isinstance(self, PointSpreadFunction):
-            return ('Hz_%.2f' % self.freq).replace('.', '_')
-        return self.__class__.__name__ + self.digest
-
-    def _get__cache_filename(self):
-        if isinstance(self, BeamformerBase):
-            return self.freq_data.basename
-        if isinstance(self, PointSpreadFunction):
-            return 'psf' + self.digest
-        return self.__class__.__name__ + self.digest
-
-    def is_cached(self):
-        return self.h5f.is_cached(self._nodename)
-
-    def _remove_cache(self):
-        if self.h5f:
-            self.h5f.remove_data(self._nodename)
-
-    def _init_cache(self):
-        # must be overwritten by subclasses
-        group = self.h5f.create_new_group(self.nodename)
-        if isinstance(self, BeamformerBase):
-            numfreq = self.freq_data.fftfreq().shape[0]  # block_size/2 + 1steer_obj
-            self.h5f.create_compressible_array(
-                'freqs',(numfreq,),'int8', group)
-            self.h5f.create_compressible_array(
-                'result', (numfreq, self.steer.grid.size), self.precision, group)
-        elif isinstance(self, PointSpreadFunction):
-            gs = self.steer.grid.size
-            group = self.h5f.create_new_group(self.nodename)
-            self.h5f.create_compressible_array('result', (gs, gs), self.precision, group)
-            self.h5f.create_compressible_array(
-                'gridpts', (gs,), 'int8', group)
-
-    def _no_cache(self):
-        if isinstance(self, (BeamformerBase, PointSpreadFunction)):
-            ac = np.zeros((self._numfreq, self.steer.grid.size), dtype=self.precision)
-            fr = np.zeros(self._numfreq, dtype='int8')
-            return (ac, fr)
-        return None
-
-    def _get_cache(self):
-        if isinstance(self, BeamformerBase):
-            ac = self.h5f.get_data_by_reference('result', '/' + self.nodename)
-            fr = self.h5f.get_data_by_reference('freqs', '/' + self.nodename)
-            if self.global_caching == 'readonly':
-                return (ac[:], fr[:])
-            return (ac, fr)
-        return None
-
-    def handle_cache(self):
-        status = config.global_caching
-        if not (  # if result caching is active
-            status == 'none' or  (status == 'individual' and \
-                     not self.cached)
-        ):
-            H5cache.get_cache_file(self, self._cache_filename)
-            if not self.h5f or (status == 'readonly' \
-                and not self.is_cached):
-                return self._no_cache()
-
-        if status == 'overwrite' and self.is_cached:
-            self._remove_cache()  # remove old data before writing in overwrite mode
-
-        if not self.is_cached and status != 'readonly':
-            self._init_cache()
-        return self._get_cache()
 
 
 def get_basename(file):

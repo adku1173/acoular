@@ -1,13 +1,9 @@
-import unittest
-
+import numpy as np
 from acoular import FiltWNoiseGenerator
-from numpy import array
 from numpy.random import RandomState
 
-# from parameterized import parameterized
-
 # some FIR/MA filter coefficients of a low pass
-MA_COEFF = array(
+MA_COEFF = np.array(
     [
         -1.43784223e-04,
         -8.36125348e-05,
@@ -87,7 +83,7 @@ MA_COEFF = array(
 )
 
 # some IIR/AR coefficients
-AR_COEFF = array(
+AR_COEFF = np.array(
     [
         1,
         -0.20514344,
@@ -109,29 +105,19 @@ AR_COEFF = array(
 )
 
 
-class Test_FiltWNoiseGenerator(unittest.TestCase):
-    def setUp(self):
-        self.fwn = FiltWNoiseGenerator(sample_freq=100, numsamples=400, seed=1)
+fwn = FiltWNoiseGenerator(sample_freq=100, numsamples=400, seed=1)
 
-    def test_no_coefficients(self):
-        """test that white noise and filtered white noise is equal when no coefficients are
-        specified."""
-        wn_signal = RandomState(seed=1).standard_normal(400)
-        signal = self.fwn.signal()
-        self.assertEqual(wn_signal.sum(), signal.sum())
+def test_no_coefficients():
+    """test that white noise and filtered white noise is equal when no coefficients are
+    specified."""
+    wn_signal = RandomState(seed=1).standard_normal(400)
+    np.testing.assert_equal(wn_signal.sum(), fwn.signal().sum())
 
-    # @parameterized.expand([
-    #     [MA_COEFF,array([]),400],
-    #     [array([]),AR_COEFF,400]
-    # ])
-    def test_correct_signal_length(self):
-        """test that signal retains correct length after filtering."""
-        parameters = [(MA_COEFF, array([]), 400), (array([]), AR_COEFF, 400)]
-        for ma, ar, expected_length in parameters:
-            self.fwn.ar = ar
-            self.fwn.ma = ma
-            self.assertEqual(self.fwn.signal().shape[0], expected_length)
+def test_correct_signal_length():
+    """test that signal retains correct length after filtering."""
+    parameters = [(MA_COEFF, np.array([]), 400), (np.array([]), AR_COEFF, 400)]
+    for ma, ar, expected_length in parameters:
+        fwn.ar = ar
+        fwn.ma = ma
+        np.testing.assert_equal(fwn.signal().shape[0], expected_length)
 
-
-if __name__ == '__main__':
-    unittest.main()

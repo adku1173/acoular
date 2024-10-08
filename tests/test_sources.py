@@ -1,11 +1,8 @@
-import unittest
-from pathlib import Path
-
 import numpy as np
 from acoular import MicGeom, PointSource, WNoiseGenerator, config
+from tests.setup import test_config
 
 config.global_caching = 'none'
-testdir = Path(__file__).parent
 
 # if this flag is set to True, new data will be simulated and
 WRITE_NEW_REFERENCE_DATA = False
@@ -43,7 +40,7 @@ def get_source_result(Source, num=32):
     return next(source.result(num)).astype(np.float32)
 
 
-class SourcesTest(unittest.TestCase):
+class SourcesTest:
     """
     A simple test case that verifies that the results of sources are not changing across different versions of code.
     """
@@ -55,13 +52,9 @@ class SourcesTest(unittest.TestCase):
         results from .npy file"""
         for source in self.sources:
             with self.subTest(source.__name__):
-                name = testdir / 'reference_data' / f'{source.__name__}.npy'
+                name = test_config.reference_data / f'{source.__name__}.npy'
                 actual_data = get_source_result(source)
                 if WRITE_NEW_REFERENCE_DATA:
                     np.save(name, actual_data)
                 ref_data = np.load(name)
                 np.testing.assert_allclose(actual_data, ref_data, rtol=1e-5, atol=1e-8)
-
-
-if __name__ == '__main__':
-    unittest.main()

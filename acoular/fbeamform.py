@@ -112,8 +112,7 @@ from .configuration import config
 from .environments import Environment
 from .fastFuncs import beamformerFreq, calcPointSpreadFunction, calcTransfer, damasSolverGaussSeidel
 from .grids import Grid, Sector
-from .h5cache import cached_file
-from .h5files import H5CacheFileBase
+from .h5cache import CacheInterface, H5cache
 from .internal import digest
 from .microphones import MicGeom
 from .spectra import PowerSpectra
@@ -290,7 +289,7 @@ class LazyBfResult:
         return self.bf._ac.__getitem__(key)
 
 
-class BeamformerBase(CacheObject):
+class BeamformerBase(CacheInterface):
     """Beamforming using the basic delay-and-sum algorithm in the frequency domain."""
 
     # Instance of :class:`~acoular.fbeamform.SteeringVector` or its derived classes
@@ -438,12 +437,6 @@ class BeamformerBase(CacheObject):
     #: Floating point precision of property result. Corresponding to numpy dtypes. Default = 64 Bit.
     precision = Trait('float64', 'float32', desc='precision (32/64 Bit) of result, corresponding to numpy dtypes')
 
-    #: Boolean flag, if 'True' (default), the result is cached in h5 files.
-    cached = Bool(True, desc='cached flag')
-
-    # hdf5 cache file
-    h5f = Instance(H5CacheFileBase, transient=True)
-
     #: The beamforming result as squared sound pressure values
     #: at all grid point locations (readonly).
     #: Returns a (number of frequencies, number of gridpoints) array-like
@@ -457,6 +450,51 @@ class BeamformerBase(CacheObject):
     def _get_digest(self):
         return digest(self)
 
+    def _get_default_cache_name(self):
+        if self._default_cache_name:
+            return self._default_cache_name
+        return self.freq_data.basename + '_cache.h5'
+
+    def init_cache(self):
+        numfreq = self.freq_data.fftfreq().shape[0]  # block_size/2 + 1steer_obj
+        group = self.h5f.create_new_group(self.default_node_name)
+        self.h5f.create_compressible_array(
+            'freqs', (numfreq,),'int8', group)
+        if isinstance(self, BeamformerAdaptiveGrid):
+            self.h5f.create_compressible_array('gpos', (3, self.size), 'float64', group)
+            self.h5f.create_compressible_array('result', (numfreq, self.size), self.precision, group)
+        elif isinstance(self, BeamformerSODIX):
+            self.h5f.create_compressible_array(
+                'result',
+                (numfreq, self.steer.grid.size * self.steer.mics.num_mics),
+                self.precision,
+                group,
+            )
+        else:
+            self.h5f.create_compressible_array('result', (numfreq, self.steer.grid.size), self.precision, group)
+
+    def init_no_cache(self):
+        if isinstance(self, BeamformerAdaptiveGrid):
+            gpos = zeros((3, self.size), dtype=self.precision)
+            ac = zeros((self._numfreq, self.size), dtype=self.precision)
+        elif isinstance(self, BeamformerSODIX):
+            ac = zeros((self._numfreq, self.steer.grid.size * self.steer.mics.num_mics), dtype=self.precision)
+            gpos = None
+        else:
+            ac = zeros((self._numfreq, self.steer.grid.size), dtype=self.precision)
+            gpos = None
+        fr = zeros(self._numfreq, dtype='int8')
+        return ac, fr, gpos
+
+    def get_cache(self):
+        ac = self.h5f.get_data_by_reference('result', '/' + self.default_node_name)
+        fr = self.h5f.get_data_by_reference('freqs', '/' + self.default_node_name)
+        if isinstance(self, BeamformerAdaptiveGrid):
+            gpos = self.h5f.get_data_by_reference('gpos', '/' + self.default_node_name)
+        else:
+            gpos = None
+        return ac, fr, gpos
+
     def _assert_equal_channels(self):
         numchannels = self.freq_data.numchannels
         if numchannels != self.steer.mics.num_mics or numchannels == 0:
@@ -465,10 +503,10 @@ class BeamformerBase(CacheObject):
     @property_depends_on('digest')
     def _get_result(self):
         """Computes the beamforming result if not cached."""
+        self._assert_equal_channels()
         self._f = self.freq_data.fftfreq()
         self._numfreq = self._f.shape[0]
-        self._assert_equal_channels()
-        self._ac, self._fr = self.handle_cache()
+        (self._ac, self._fr, self._gpos), is_cached = self.handle_cache()
         return LazyBfResult(self)
 
     def sig_loss_norm(self):
@@ -979,7 +1017,7 @@ class BeamformerMusic(BeamformerEig):
             self._fr[i] = 1
 
 
-class PointSpreadFunction(CacheObject):
+class PointSpreadFunction(CacheInterface):
     """The point spread function.
 
     This class provides tools to calculate the PSF depending on the used
@@ -1135,15 +1173,22 @@ class PointSpreadFunction(CacheObject):
     #: Frequency to evaluate the PSF for; defaults to 1.0.
     freq = Float(1.0, desc='frequency')
 
-    # hdf5 cache file
-    h5f = Instance(H5CacheFileBase, transient=True)
-
     # internal identifier
     digest = Property(depends_on=['_steer_obj.digest', 'precision'], cached=True)
 
     @cached_property
     def _get_digest(self):
         return digest(self)
+
+    def _get_default_cache_name(self):
+        if self._default_cache_name:
+            return self._default_cache_name + '_cache.h5'
+        return 'psf' + self.digest
+
+    def _get_default_node_name(self):
+        if self._default_node_name:
+            return self._default_node_name
+        return ('Hz_%.2f' % self.freq).replace('.', '_')
 
     def _get_filecache(self):
         """Function collects cached results from file depending on
@@ -1152,7 +1197,7 @@ class PointSpreadFunction(CacheObject):
         """
         filename = 'psf' + self.digest
         nodename = ('Hz_%.2f' % self.freq).replace('.', '_')
-        #        print("get cachefile:", filename)
+        print("get cachefile:", filename)
         H5cache.get_cache_file(self, filename)
         if not self.h5f:  # only happens in case of global caching readonly
             #            print("no cachefile:", filename)
@@ -1214,7 +1259,7 @@ class PointSpreadFunction(CacheObject):
         self.calc_psf()
         return self._ac[:, self.grid_indices]
 
-    def calc_psf(self):
+    def calc_psf(self, ac, gp):
         """point-spread function calculation."""
         if self.calcmode != 'full':
             # calc_ind has the form [True, True, False, True], except

@@ -111,8 +111,8 @@ from traits.api import (
 
 from .configuration import config
 from .environments import cartToCyl, cylToCart
-from .h5cache import H5cache
-from .h5files import H5CacheFileBase, _get_h5file_class
+from .h5cache import CacheInterface, H5cache
+from .h5files import _get_h5file_class
 
 # acoular imports
 from .internal import digest, ldigest
@@ -1856,14 +1856,11 @@ class OctaveFilterBank(FilterBank):
         return sos
 
 
-class TimeCache(TimeInOut):
+class TimeCache(TimeInOut, CacheInterface):
     """Caches time signal in cache file."""
 
     # basename for cache
     basename = Property(depends_on='digest')
-
-    # hdf5 cache file
-    h5f = Instance(H5CacheFileBase, transient=True)
 
     # internal identifier
     digest = Property(depends_on=['source.digest', '__class__'])
@@ -1886,11 +1883,16 @@ class TimeCache(TimeInOut):
                 obj = None
         return basename
 
+    def _get_default_node_name(self):
+        if self._default_node_name:
+            return self._default_node_name
+        return 'tc_' + self.digest
+
     def _pass_data(self, num):
         yield from self.source.result(num)
 
     def _write_data_to_cache(self, num):
-        nodename = 'tc_' + self.digest
+        nodename = self.default_nodename
         self.h5f.create_extendable_array(nodename, (0, self.numchannels), 'float32')
         ac = self.h5f.get_data_by_reference(nodename)
         self.h5f.set_node_attribute(ac, 'sample_freq', self.sample_freq)
@@ -1902,7 +1904,7 @@ class TimeCache(TimeInOut):
         self.h5f.set_node_attribute(ac, 'complete', True)
 
     def _get_data_from_cache(self, num):
-        nodename = 'tc_' + self.digest
+        nodename = self.default_nodename
         ac = self.h5f.get_data_by_reference(nodename)
         i = 0
         while i < ac.shape[0]:
@@ -1910,7 +1912,7 @@ class TimeCache(TimeInOut):
             i += num
 
     def _get_data_from_incomplete_cache(self, num):
-        nodename = 'tc_' + self.digest
+        nodename = self.default_nodename
         ac = self.h5f.get_data_by_reference(nodename)
         i = 0
         nblocks = 0
@@ -1951,8 +1953,8 @@ class TimeCache(TimeInOut):
         if config.global_caching == 'none':
             generator = self._pass_data
         else:
-            nodename = 'tc_' + self.digest
-            H5cache.get_cache_file(self, self.basename)
+            nodename = self.default_nodename
+            H5cache.get_cache_file(self, self.default_cache_name)
             if not self.h5f:
                 generator = self._pass_data
             elif self.h5f.is_cached(nodename):
