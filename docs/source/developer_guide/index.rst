@@ -1,7 +1,14 @@
-Source Code Principles
-======================
+Developer Guide
+===============
 
 In this section, some important principles of writing source code for Acoular are discussed. 
+
+Naming Conventions
+------------------
+
+Private Attributes and Methods
+------------------------------
+
 
 Traits API
 ----------
@@ -18,17 +25,12 @@ Common Patterns
 # delegate
 # trait listeners
 
-Naming Conventions
-------------------
-
-Private Attributes and Methods
-------------------------------
 
 Hashing
 -------
 
-Different Levels of Caching
----------------------------
+Implement Caching
+-----------------
 
 Cached Properties
 ~~~~~~~~~~~~~~~~~
@@ -40,6 +42,22 @@ Speeding up the Code with Numba
 -------------------------------
 
 
+Testing 
+-------
 
+Pytest Primer
+~~~~~~~~~~~~~
+
+Fixtures
+~~~~~~~~
+
+Unit Tests
+~~~~~~~~~~
+
+Regression Tests
+~~~~~~~~~~~~~~~~
+
+Writing your own Tests
+~~~~~~~~~~~~~~~~~~~~~~
 
 

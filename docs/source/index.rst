@@ -57,6 +57,10 @@ Contents:
 
       - The basics for using Acoular, explained with a simple example.
 
+    * - :doc:`user_guide/index` 
+
+      - Detailed information on how to use Acoular for different tasks.
+
     * - :doc:`auto_examples/index` 
 
       - Example scripts covering different use cases.
