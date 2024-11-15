@@ -53,17 +53,9 @@ Contents:
       - Description of the different download and installation options to get 
         Acoular running on your system.
 
-    * - :doc:`get_started/index` 
-
-      - The basics for using Acoular, explained with a simple example.
-
     * - :doc:`user_guide/index` 
 
       - Detailed information on how to use Acoular for different tasks.
-
-    * - :doc:`auto_examples/index` 
-
-      - Example scripts covering different use cases.
 
     * - :doc:`news/index` 
 
@@ -72,11 +64,6 @@ Contents:
     * - :doc:`contributing/index`
 
       - Information on how to contribute to the development of Acoular.
-
-    * - :doc:`api_ref/index` 
-
-      - All modules, classes and methods featured in Acoular are described in detail
-        here. They can easily be browsed through an inheritance tree and cross links.
 
     * - :doc:`literature/index` 
 

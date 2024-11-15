@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import inspect
 import acoular
 from sphinx_gallery.sorting import ExplicitOrder
 
@@ -75,8 +75,10 @@ latex_documents = [
 # ------------------------------------------------
 
 inheritance_graph_attrs = {'rankdir': "LR", 'size': '"11.0,24.0"',
-                               'fontsize': 18, 'ratio': 'compress'}
+                               'fontsize': 18, 'ratio': 'compress', 'center': True }
 
+inheritance_node_attrs = dict(fillcolor='dodgerblue1', style='filled')
+                              
 #%%
 # sphinx.ext.autosummary extension settings
 
@@ -161,3 +163,15 @@ sphinx_gallery_conf = {
 
 bibtex_bibfiles = ["literature/literature.bib"]
 bibtex_default_style = 'unsrt'
+
+#%%
+
+numclasses = len(
+    [cls for _, cls in inspect.getmembers(acoular, inspect.isclass) if cls.__module__.startswith("acoular")])
+nummodules = len(
+    [mod for _, mod in inspect.getmembers(acoular, inspect.ismodule) if mod.__name__.startswith("acoular")])
+rst_epilog = f"""
+    .. |numclasses| replace:: {numclasses}
+    .. |nummodules| replace:: {nummodules}
+"""
+
