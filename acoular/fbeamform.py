@@ -54,7 +54,6 @@ import scipy.linalg as spla
 # check for sklearn version to account for incompatible behavior
 import sklearn
 from packaging.version import parse
-from scipy.linalg import solve
 from scipy.optimize import fmin_l_bfgs_b, linprog, nnls, shgo
 from sklearn.linear_model import LassoLars, LassoLarsCV, LassoLarsIC, LinearRegression, OrthogonalMatchingPursuitCV
 from traits.api import (
@@ -74,8 +73,6 @@ from traits.api import (
     cached_property,
     observe,
     property_depends_on,
-    Str
-    Callable,
     Union
 )
 from traits.trait_errors import TraitError
@@ -94,7 +91,7 @@ from .microphones import MicGeom
 from .spectra import PowerSpectra
 from .tfastfuncs import _steer_I, _steer_II, _steer_III, _steer_IV
 from .tools.utils import synthetic_indices
-from .solver import SolverBase, GaussSeidelSolver
+from .solver import SolverBase, GaussSeidelSolver, SBLSolver
 
 sklearn_ndict = {}
 if parse(sklearn.__version__) < parse('1.4'):
@@ -2485,25 +2482,14 @@ class BeamformerSBL(AutoPowerSpectra):
 
     steer = Instance(SteeringVector, args=())
 
+    solver = Instance(SBLSolver, args=())
+
     num_snapshots = Int(-1)
 
     num_channels = Property()
 
-    method = Enum(
-        'SBL1',
-        'SBL',
-        'M-SBL',
-    )
-
-    options = Dict({
-        'eps': 1e-3,
-        'n_iter': 500,   
-        })
-
-    res = Dict()
-
     digest = Property(
-        depends_on=['source.digest', 'steer.digest'],
+        depends_on=['source.digest', 'steer.digest', 'solver.digest'],
     )
 
     def _get_digest(self):
@@ -2511,95 +2497,6 @@ class BeamformerSBL(AutoPowerSpectra):
 
     def _get_num_channels(self):
         return self.steer.grid.size
-
-    def find_peaks(self, gamma, num_sources):
-        pks    = np.zeros((num_sources))
-        locs   = np.zeros((num_sources),dtype = int)
-        Ntheta = len(gamma)
-        gamma  = gamma.reshape(Ntheta)
-        gamma_new = np.zeros((Ntheta+2)) # zero padding on the boundary
-        gamma_new[1:Ntheta+1] = gamma;
-        Ilocs  = np.flip(gamma.argsort(axis = 0))
-        npeaks = 0;         # current number of peaks found
-        local_patch=np.zeros((num_sources))
-        for ii in range(Ntheta):
-            local_patch = [gamma_new[(Ilocs[ii])], 0, gamma_new[(Ilocs[ii]+2)]]
-            # zero the center
-            if sum(gamma[Ilocs[ii]] > local_patch) == 3:
-                pks[npeaks] = gamma[Ilocs[ii]]
-                locs[npeaks] = Ilocs[ii]
-                npeaks = npeaks + 1
-                # if found sufficient peaks, break
-                if npeaks == num_sources:
-                    break
-        return locs
-
-    def estimate_noise_power(self, gamma, csm, a):
-        # 
-        nc = a.shape[0]
-        if False:
-            ga = self.find_peaks(gamma, 10)
-        else:
-            ga = gamma > 0
-            ga_sum = ga.sum() # active set
-            print(f'Active grid points: {ga_sum} out of {nc}')
-            if ga_sum > nc - 1:
-                # sort gamma and take the num_channels-1 largest values
-                sorted_indices = np.argsort(gamma)[::-1]
-                ga = np.zeros_like(gamma, dtype=bool)
-                ga[sorted_indices[:nc - 1]] = True
-        a_sub = a[:,ga]
-        P = a_sub @ np.linalg.solve(a_sub.conj().T @ a_sub, a_sub.conj().T)
-        return np.real(np.trace((np.eye(nc) - P) @ csm / (nc - a_sub.shape[1])))
-
-    def calc(self, spectra, csm, f):
-        # get solver options
-        eps = self.options.get('eps', 1e-4)
-        n_iter = self.options.get('n_iter', 500)
-
-        a = self.steer.transfer(f).T
-        gamma = np.einsum('mg,mn,ng->g', a.conj(), csm, a).real
-        gamma[gamma < 0] = 0
-        max_sig_sq = np.real(np.trace(csm))/self.steer.mics.num_mics # noise power initializtion 
-        I = np.eye(csm.shape[0])
-        L = spectra.shape[0]
-        
-        # SBL uses sample cross-spectral matrix for the denominator (can be calculated once)
-        if self.method == 'SBL':
-            csm_inv_a_denum = solve(csm, a, assume_a='her')
-            gamma_denum_full = np.abs(np.sum(np.conj(a) * csm_inv_a_denum, axis=0).real)
-
-        for i in range(n_iter):
-            sig_sq_est = np.minimum(self.estimate_noise_power(gamma, csm, a), max_sig_sq)
-            gamma_prev = gamma.copy()
-            ga = gamma > 0
-            gamma_sub = gamma[ga]
-            a_sub = a[:,ga]
-            csm_mod = (a_sub * gamma_sub[None, :]) @ a_sub.conj().T + sig_sq_est * I
-            csm_inv_a = solve(csm_mod, a_sub, assume_a='her')
-            gamma_num = np.linalg.norm(spectra.conj() @ csm_inv_a, axis=0)**2 / L
-            if self.method == 'SBL':
-                gamma_denum = gamma_denum_full[ga]
-            elif self.method == 'SBL1':
-                gamma_denum = np.abs(np.sum(np.conj(a_sub) * csm_inv_a, axis=0).real)
-            
-            # calc gamma
-            if self.method == 'M-SBL':
-#                sigma_x = np.linalg.inv(1/sig_sq_est*a_sub.T.conj()@a_sub  + np.diag(1/gamma_sub))
-                A_matrix = 1/sig_sq_est * a_sub.T.conj() @ a_sub + np.diag(1/gamma_sub)
-                sigma_x_diag = np.linalg.solve(A_matrix, np.eye(A_matrix.shape[0])).diagonal()
-                gamma[ga] = (gamma[ga]**2) * gamma_num + sigma_x_diag
-            else:
-                gamma[ga] *= np.sqrt(gamma_num / gamma_denum)  
-            if np.any(gamma < 0):
-                warn(f'Negative gamma values at iteration {i+1}, setting to zero.')
-                gamma[gamma < 0] = 0
-            # checks convergence and displays status reports
-            errornorm = np.linalg.norm(gamma - gamma_prev, ord = 1) / np.linalg.norm(gamma_prev, ord = 1)
-            if errornorm < eps:
-                break
-            print(f'Iteration {i+1}/{n_iter}, error norm: {errornorm:.2e}')
-        return gamma
     
     def result(self, num=1):
         nm = self.steer.mics.num_mics
@@ -2612,17 +2509,20 @@ class BeamformerSBL(AutoPowerSpectra):
         all_snap = ns*num
         for spectra in self.source.result(num=all_snap):
             spectra = spectra.reshape(-1, nf, nm)* np.sqrt(self._get_scaling_value())
-
-            num_out = spectra.shape[0]//ns + 1
+            num_out = spectra.shape[0]//ns
             gamma = np.zeros((num_out, self.num_freqs, self.steer.grid.size))
             ni = 0
+            A_arr = np.zeros(
+                (len(self.freqs), self.steer.mics.num_mics, self.num_channels), dtype='complex128')
+            for j, f in enumerate(self.freqs):
+                A_arr[j] = self.steer.transfer(f).T
+
             for i in range(num_out):
                 ni_stop = min(ni+ns, spectra.shape[0])
-                spectra_frame = spectra[ni:ni_stop]
+                y = spectra[ni:ni_stop]
                 csm = np.einsum(
-                    'sfn,sfm->fnm', spectra_frame, np.conj(spectra_frame), optimize=True) / spectra_frame.shape[0]
+                    'sfn,sfm->fnm', y, np.conj(y), optimize=True) / y.shape[0]
                 for j, f in enumerate(self.freqs):
-                    print(f"Processing frequency {f} Hz") # test only one frequency for now
-                    gamma[i] = self.calc(spectra_frame[:,j], csm[j], f)
+                    gamma[i] = self.solver.solve(A=A_arr[j], y=y[:,j], csm=csm[j], gamma=None, index=j)
             yield gamma.reshape(-1, self.num_freqs*self.steer.grid.size)
         

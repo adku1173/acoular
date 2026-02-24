@@ -25,16 +25,21 @@ Source Location        Level
 
 
 """
-
+import sys 
+sys.path.append('/home/kujawski/Documents/Code/SBL/SBL_MF_Python')  # noqa: E402
+from sbl import SBL, Options
 from pathlib import Path
 
 import acoular as ac
 import numpy as np
-
+import matplotlib.pyplot as plt
 
 sfreq = 51200
 block_size = 512
-duration = 1
+niter = 100
+n_snap = -1
+dyn= 20
+duration = 5.
 num_samples = duration * sfreq
 micgeofile = Path(ac.__file__).parent / 'xml' / 'array_64.xml'
 h5savefile = Path('three_sources.h5')
@@ -50,18 +55,51 @@ p = ac.Mixer(source=p1, sources=[p2, p3])
 fft = ac.RFFT(source=p, block_size=block_size, window='Rectangular')
 rg = ac.RectGrid(x_min=-0.2, x_max=0.2, y_min=-0.2, y_max=0.2, z=-0.3, increment=0.01)
 st = ac.SteeringVector(grid=rg, mics=m)
-sbl = ac.SparseBayesianLearning(
-    source=fft,
+
+mf = ac.MaskedFreqOut(source=fft)
+f = 8000
+
+print(f"helmholz number ", m.aperture*f/343)
+mf.freqs = [f]
+
+sbl = ac.BeamformerSBL(
+    source=mf,
     steer=st,
-    n_iter=100,
+    num_snapshots=n_snap,
 )
-pow = ac.PowerSpectra(source=p, block_size=block_size, window='Rectangular')
+sbl.solver.method = 'SBL1'
+sbl.solver.options['nsources'] = 10
+sbl.solver.options['sig_sq'] = None
 
-csm2 = next(sbl.result(num=1))
-csm1 = pow.csm[:]
+if True:
+    sm = next(sbl.result(num=1))
+    sm.reshape(-1, sbl.num_freqs, st.grid.size)
+    sm = sm[0].reshape(rg.shape)   
+    Lm = ac.L_p(sm)
 
-csm_diff = csm1 - csm2
-print(f"Difference between CSMs: {np.linalg.norm(csm_diff)}")
+    plt.figure()
+    plt.subplot(1, 2, 1)
+    plt.imshow(Lm.T, vmax=Lm.max(), vmin=Lm.max()-dyn, origin='lower', extent=(rg.x_min, rg.x_max, rg.y_min, rg.y_max))
+    plt.colorbar(label='L_p (dB)')
+    plt.xlabel('x (m)')
+    plt.ylabel('y (m)')
+    plt.title('Sparse Bayesian Learning Result')
+
+    opt = Options(10 ** (-4), 10 ** (-4), niter, 1, 1, 2, 3, 1)
+    spectra = next(mf.result(num=mf.num_samples))
+    spectra = spectra.reshape(-1, mf.num_freqs, mf.num_channels)
+    spectra = spectra[:, 0, :].T[..., np.newaxis]
+    sm = SBL(A=st.transfer(mf.freqs[0]).T[..., np.newaxis], Y=spectra, options=opt)
+    sm = sm[0].reshape(rg.shape)
+    Lm = ac.L_p(sm)
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(Lm.T, vmax=Lm.max(), vmin=Lm.max()-dyn, origin='lower', extent=(rg.x_min, rg.x_max, rg.y_min, rg.y_max))
+    plt.colorbar(label='L_p (dB)')
+    plt.xlabel('x (m)')
+    plt.ylabel('y (m)')
+    plt.title('Sparse Bayesian Learning Result')
+    plt.show()
 
 
 # %%

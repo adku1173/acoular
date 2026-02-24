@@ -30,6 +30,7 @@ from pathlib import Path
 
 import acoular as ac
 
+
 sfreq = 51200
 duration = 1
 num_samples = duration * sfreq

@@ -1,5 +1,7 @@
 
 
+from requests import options
+
 import numpy as np
 
 # check for sklearn version to account for incompatible behavior
@@ -18,12 +20,14 @@ from traits.api import (
     Bool
 )
 from traits.trait_errors import TraitError
+from scipy.linalg import solve
 
 
 # acoular imports
 from .configuration import config
 from .fastFuncs import damasSolverGaussSeidel
 from .internal import digest
+from warnings import warn
 
 sklearn_ndict = {}
 if parse(sklearn.__version__) < parse('1.4'):
@@ -52,12 +56,13 @@ class SolverBase(HasStrictTraits):
 class GaussSeidelSolver(SolverBase):
 
     options = Dict({
-        'niter': 100, 'damp': 1.0, 'callback': None, 'stol': 1e-10, 'rtol': 1e-10})
+        'niter': 100, 'damp': 1.0, 'callback': None, 'stol1': 1e-10, 'stol': 1e-10, 'rtol': 1e-10})
 
     def solve(self, A, y, x, index=None):
         niter = self.options.get('niter', 100)
         damp = self.options.get('damp', 1.0)
         stol = self.options.get('stol', 1e-10)
+        stol1 = self.options.get('stol1', 1e-10)
         rtol = self.options.get('rtol', 1e-10)
         ngrid = A.shape[1]
         if self.options.get('callback') is not None:
@@ -67,6 +72,7 @@ class GaussSeidelSolver(SolverBase):
             have_callback = False
         cost = []
         s_cost = []
+        s1_cost = []
         r_cost = []
         y_norm = np.linalg.norm(y)
         for i in range(niter):
@@ -77,9 +83,11 @@ class GaussSeidelSolver(SolverBase):
 
             res = np.linalg.norm(A@x - y)
             sres = np.linalg.norm(x - x_old) / np.linalg.norm(x)
+            sres1 = np.linalg.norm(x - x_old, ord=1) / np.linalg.norm(x_old, ord=1)
             rres = res / y_norm
             cost.append(res)
             s_cost.append(sres)
+            s1_cost.append(sres1)
             r_cost.append(rres)
             if sres < stol:
                 print(f"Converged at iteration {i+1} with sres={sres:.2e} < stol={stol:.2e}")
@@ -87,16 +95,151 @@ class GaussSeidelSolver(SolverBase):
             if rres < rtol:
                 print(f"Converged at iteration {i+1} with rres={rres:.2e} < rtol={rtol:.2e}")
                 break
+            if sres1 < stol1:
+                print(f"Converged at iteration {i+1} with sres1={sres1:.2e} < stol1={stol1:.2e}")
+                break
         self.output = {
             index: {
                 'ntotal': i + 1,
                 'cost': cost,
                 's_cost': s_cost,
+                's1_cost': s1_cost,
                 'r_cost': r_cost
             }
         }
         return x
 
+class SBLSolver(SolverBase):
+
+    method = Enum('SBL', 'SBL1', 'M-SBL')
+
+    options = Dict({
+        'niter': 100, 'callback': None, 'stol': 1e-17, 'stol1': 1e-10, 'grange': 1e-3, 'nsources': None, 'sig_sq': None
+        })
+
+    def estimate_noise_power(self, gamma, csm, a):
+        # 
+        nc = a.shape[0]
+        if self.options.get('nsources') is None:
+            ga = np.argwhere(gamma>max(gamma)*self.options.get('grange', 1e-4)).ravel()
+            ga_sum = ga.sum() # active set
+            if ga_sum > nc - 1:
+                # sort gamma and take the num_channels-1 largest values
+                sorted_indices = np.argsort(gamma)[::-1]
+                ga = np.zeros_like(gamma, dtype=bool)
+                ga[sorted_indices[:nc - 1]] = True
+        else:
+            ga = self.find_peaks(gamma)
+        a_sub = a[:,ga]
+        P = a_sub @ np.linalg.solve(a_sub.conj().T @ a_sub, a_sub.conj().T)
+        return np.real(np.trace((np.eye(nc) - P) @ csm / (nc - a_sub.shape[1])))
+
+    def find_peaks(self, gamma):
+        ns = self.options.get('nsources')
+        locs = np.zeros((ns),dtype = int)
+        ng = len(gamma)
+        gamma  = gamma.reshape(ng)
+        gamma_new = np.zeros((ng+2)) # zero padding on the boundary
+        gamma_new[1:ng+1] = gamma;
+        Ilocs  = np.flip(gamma.argsort(axis = 0))
+        npeaks = 0
+        local_patch=np.zeros((ns))
+        for ii in range(ng):
+            local_patch = [gamma_new[(Ilocs[ii])], 0, gamma_new[(Ilocs[ii]+2)]]
+            # zero the center
+            if sum(gamma[Ilocs[ii]] > local_patch) == 3:
+                locs[npeaks] = Ilocs[ii]
+                npeaks = npeaks + 1
+                # if found sufficient peaks, break
+                if npeaks == ns:
+                    break
+        return locs
+    
+    def solve(self, A, y, csm, gamma, index):
+        # get solver options
+        nc = A.shape[0]
+        if self.options.get('stol') is not None:
+            stol = self.options.pop('stol')
+        else:
+            stol = 1e-10
+        if self.options.get('stol1') is not None:
+            stol1 = self.options.pop('stol1')
+        else:            
+            stol1 = 1e-10
+        niter = self.options.get('niter', 100)
+        s_cost = []
+        s1_cost = []
+
+        if gamma is None:
+            gamma = np.einsum('mg,mn,ng->g', A.conj(), csm, A).real
+            gamma[gamma < 0] = 0
+        I = np.eye(csm.shape[0])
+        L = y.shape[0]
+        
+        # SBL uses sample cross-spectral matrix for the denominator (can be calculated once)
+        if self.method == 'SBL':
+            csm_inv_a_denum = solve(csm, A, assume_a='her')
+            gamma_denum_full = np.abs(np.sum(np.conj(A) * csm_inv_a_denum, axis=0).real)
+        
+        
+        if self.options.get('sig_sq') is not None:
+            sig_sq_est = self.options.get('sig_sq')
+            estimate_noise_variance = False
+        else:
+            max_sig_sq = np.real(np.trace(csm))/nc 
+            sig_sq_est = max_sig_sq
+            estimate_noise_variance = True
+
+        for i in range(niter):
+            gamma_prev = gamma.copy()
+            ga = np.argwhere(gamma>max(gamma)*self.options.get('grange', 1e-4)).ravel()
+            gamma_sub = gamma[ga]
+            a_sub = A[:,ga]
+            csm_mod = (a_sub * gamma_sub[None, :]) @ a_sub.conj().T + sig_sq_est * I
+            csm_inv_a = solve(csm_mod, a_sub, assume_a='her')
+            gamma_num = np.linalg.norm(y.conj() @ csm_inv_a, axis=0)**2 / L
+            if self.method == 'SBL':
+                gamma_denum = gamma_denum_full[ga]
+            elif self.method == 'SBL1':
+                gamma_denum = np.abs(np.sum(np.conj(a_sub) * csm_inv_a, axis=0).real)
+            
+            # calc gamma
+            if self.method == 'M-SBL':
+#                sigma_x = np.linalg.inv(1/sig_sq_est*a_sub.T.conj()@a_sub  + np.diag(1/gamma_sub))
+                A_matrix = 1/sig_sq_est * a_sub.T.conj() @ a_sub + np.diag(1/gamma_sub)
+                sigma_x_diag = np.linalg.solve(A_matrix, np.eye(A_matrix.shape[0])).diagonal()
+                gamma[ga] = (gamma[ga]**2) * gamma_num + sigma_x_diag
+            else:
+                gamma[ga] *= np.sqrt(gamma_num / gamma_denum)  
+            if np.any(gamma < 0):
+                warn(f'Negative gamma values at iteration {i+1}, setting to zero.')
+                gamma[gamma < 0] = 0
+
+            # new noise estimate
+            if estimate_noise_variance:
+                sig_sq_est = np.minimum(self.estimate_noise_power(gamma, csm, A), max_sig_sq)
+                sig_sq_est = max(sig_sq_est, 1e-10*max_sig_sq) 
+
+            # checks convergence and displays status reports
+            sres = np.linalg.norm(gamma - gamma_prev) / np.linalg.norm(gamma)
+            sres1 = np.linalg.norm(gamma - gamma_prev, ord=1) / np.linalg.norm(gamma_prev, ord=1)
+            if sres < stol:
+                print(f"Converged at iteration {i+1} with sres={sres:.2e} < stol={stol:.2e}")
+                break
+            if sres1 < stol1:
+                print(f"Converged at iteration {i+1} with sres1={sres1:.2e} < stol1={stol1:.2e}")
+                break
+            s_cost.append(sres)
+            s1_cost.append(sres1)
+
+        self.output = {
+            index: {
+                'ntotal': i + 1,
+                's_cost': s_cost,
+                's1_cost': s1_cost,
+            }
+        }
+        return gamma    
 
 class ISTACV(SolverBase):
 
@@ -136,6 +279,10 @@ class ISTACV(SolverBase):
                 rtol = options.pop('rtol')         
             else:
                 rtol = 1e-10
+            if options.get('stol1') is not None:
+                stol1 = options.pop('stol1')
+            else:
+                stol1 = 1e-10
 
 
             y = np.asarray(y).ravel()
@@ -204,7 +351,11 @@ class ISTACV(SolverBase):
                 rtol = self.options.pop('rtol')
             else:                
                 rtol = 1e-10
-            cb1 = CallbackISTA(stol=stol, rtol=rtol)
+            if self.options.get('stol1') is not None:
+                stol1 = self.options.pop('stol1')
+            else:
+                stol1 = 1e-10
+            cb1 = CallbackISTA(stol=stol, rtol=rtol, stol1=stol1)
             cb.append(cb1)
             if self.options.get('callback') is not None:
                 cb.append(self.options.pop('callback'))
@@ -216,6 +367,7 @@ class ISTACV(SolverBase):
                 'eps': eps,
                 'r_cost': cb1.r_cost,
                 's_cost': cb1.s_cost,
+                's1_cost': cb1.s1_cost,
                 'res_cost': cb1.cost
 
             }}
@@ -226,11 +378,13 @@ class CallbackISTA(pylops.optimization.callback.Callbacks):
     """
     see also:https://pylops.readthedocs.io/en/v2.5.0/tutorials/classsolvers.html#sphx-glr-tutorials-classsolvers-py
     """
-    def __init__(self, stol=1e-10, rtol=1e-10):
+    def __init__(self, stol=1e-10, rtol=1e-10, stol1=1e-10):
         self.stol = stol
         self.rtol = rtol
+        self.stol1 = stol1
         self.cost = []
         self.s_cost = []
+        self.s1_cost = []
         self.r_cost = []
         self.stop = False
 
@@ -254,10 +408,12 @@ class CallbackISTA(pylops.optimization.callback.Callbacks):
             return  # skip first iteration since it is just the initial guess
         res = np.linalg.norm(solver.Op @ x - solver.y)
         sres = np.linalg.norm(x - self.xold) / np.linalg.norm(x)
+        sres1 = np.linalg.norm(x - self.xold, ord=1) / np.linalg.norm(self.xold, ord=1)
         rres = res / self.y_norm
         if self.xold is not None:
             self.cost.append(res)
             self.s_cost.append(sres)
+            self.s1_cost.append(sres1)
             self.r_cost.append(rres)
         self.xold = x
         if sres < self.stol:
@@ -265,6 +421,9 @@ class CallbackISTA(pylops.optimization.callback.Callbacks):
             self.stop = True
         if rres < self.rtol:
             print(f"Converged at iteration {solver.iiter} with rres={rres:.2e} < rtol={self.rtol:.2e}")
+            self.stop = True
+        if sres1 < self.stol1:
+            print(f"Converged at iteration {solver.iiter} with sres1={sres1:.2e} < stol1={self.stol1:.2e}")
             self.stop = True
 
 
@@ -289,11 +448,14 @@ class NNLSProjLandweber(SolverBase):
             rtol = self.options.pop('rtol')
         else:
             rtol = 1e-10
-        
+        if self.options.get('stol1') is not None:
+            stol1 = self.options.pop('stol1')
+        else:            
+            stol1 = 1e-10
         cb = []
         if self.positive:
             cb.append(PositivityCallback())
-        cb1 = CallbackISTA(stol=stol, rtol=rtol)
+        cb1 = CallbackISTA(stol=stol, rtol=rtol, stol1=stol1)
         cb.append(cb1)
         if self.options.get('callback') is not None:
             cb.append(self.options.pop('callback'))
@@ -304,6 +466,6 @@ class NNLSProjLandweber(SolverBase):
             'cost': cost,
             'r_cost': cb1.r_cost,
             's_cost': cb1.s_cost,
-            'res_cost': cb1.cost
+            's1_cost': cb1.s1_cost,
         }}
         return xhat.squeeze()
