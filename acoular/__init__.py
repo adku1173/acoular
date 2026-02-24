@@ -96,7 +96,7 @@ from .sources import (
     UncorrelatedNoiseSource,
 )
 
-from .solver import SolverBase, ISTACV, GaussSeidelSolver
+from .solver import SolverBase, ISTACV, GaussSeidelSolver, NNLSProjLandweber
 
 from .tools.helpers import synthetic
 from .spectra import BaseSpectra, PowerSpectra, PowerSpectraImport

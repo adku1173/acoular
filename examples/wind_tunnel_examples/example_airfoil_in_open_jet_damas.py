@@ -46,7 +46,7 @@ ts = ac.MaskedTimeSamples(
 )
 calib = ac.Calib(source=ts, file=calib_file, invalid_channels=[1, 7])
 mics = ac.MicGeom(file=Path(ac.__file__).parent / 'xml' / 'array_56.xml', invalid_channels=[1, 7])
-grid = ac.RectGrid(x_min=-0.6, x_max=-0.0, y_min=-0.3, y_max=0.3, z=-0.68, increment=0.04)
+grid = ac.RectGrid(x_min=-0.6, x_max=-0.0, y_min=-0.3, y_max=0.3, z=-0.68, increment=0.05)
 env = ac.Environment(c=346.04)
 st = ac.SteeringVector(grid=grid, mics=mics, env=env)
 f = ac.PowerSpectra(source=calib, window='Hanning', overlap='50%', block_size=128)
@@ -65,7 +65,7 @@ b = ac.BeamformerDamas(freq_data=f, steer=st)
 import matplotlib.pyplot as plt
 
 
-methods = ['GaussSeidel', 'FISTA', 'ISTA'][::-1]
+methods = ['GaussSeidel', 'NNLS', 'FISTA', 'ISTA']
 s_metrics = {}
 r_metrics = {}
 
@@ -74,14 +74,18 @@ i1 = 1
 for method in methods:
     print(f"Processing {method}...")
     if method in ['FISTA','ISTA']:
-        b.solver = ac.ISTACV(method=method, num_grid=20, cv=5, seed=42, warm_start=True,
-                             options={'niter': 5000, 'tol': 1e-17}, 
+        b.solver = ac.ISTACV(method=method, num_grid=10, cv=5, seed=42, warm_start=True,
+                             options={'niter': 5000, 'tol': 1e-17, 'stol': 1e-6}, 
                              cv_options={'niter': 5000, 'tol': 1e-17}
                              )
         map = b.synthetic(cfreq, 0)
         title = method
+    elif method == 'NNLS':
+        b.solver = ac.NNLSProjLandweber(options={'niter': 5000, 'tol': 1e-32, 'stol': 1e-6})
+        map = b.synthetic(cfreq, 0)
+        title = method
     else:
-        b.solver = ac.GaussSeidelSolver(options={'niter': 5000})
+        b.solver = ac.GaussSeidelSolver(options={'niter': 5000, 'stol': 1e-6})
         map = b.synthetic(cfreq, 0)
         title = method
     

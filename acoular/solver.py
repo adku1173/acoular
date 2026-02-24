@@ -124,9 +124,20 @@ class ISTACV(SolverBase):
 
         warm_start = Bool(True)  # whether to use the solution from the previous regularization parameter as the initial guess for the next one
 
+        positive = Bool(True)  # whether to enforce non-negativity constraint on the solution
+
         def grid_search(self, A, y, x0, reg, model):
             options = self.cv_options if self.cv_options is not None else self.options
-            
+            if options.get('stol') is not None:
+                stol = options.pop('stol')
+            else:
+                stol = 1e-10
+            if options.get('rtol') is not None:
+                rtol = options.pop('rtol')         
+            else:
+                rtol = 1e-10
+
+
             y = np.asarray(y).ravel()
             M = y.size
             kf = sklearn.model_selection.KFold(n_splits=self.cv, shuffle=True, random_state=self.seed)
@@ -146,8 +157,12 @@ class ISTACV(SolverBase):
                     Opva = Rva * A
                     yva  = Rva * y
                     # Solve on training subset
-                    cb1 = CallbackISTA(stol=options.get('stol', 1e-10), rtol=options.get('tol', 1e-10))
-                    cb = [cb1]
+                    cb = []
+                    if self.positive:
+                        cb.append(PositivityCallback())
+                    cb.append(
+                        CallbackISTA(stol=stol,rtol=rtol)
+                    )
                     if options.get('callback') is not None:
                         cb.append(options.pop('callback'))
                     model_instance = model(pylops.MatrixMult(Optr), callbacks=cb)
@@ -177,8 +192,20 @@ class ISTACV(SolverBase):
             eps = self.grid_search(A, y, x, reg_values, model)
 
             # run main loop
-            cb1 = CallbackISTA(stol=self.options.get('stol', 1e-10), rtol=self.options.get('tol', 1e-10))
-            cb = [cb1]
+            cb = []
+            if self.positive:
+                cb.append(PositivityCallback())
+            # pop if included
+            if self.options.get('stol') is not None:
+                stol = self.options.pop('stol')
+            else:
+                stol = 1e-10
+            if self.options.get('rtol') is not None:
+                rtol = self.options.pop('rtol')
+            else:                
+                rtol = 1e-10
+            cb1 = CallbackISTA(stol=stol, rtol=rtol)
+            cb.append(cb1)
             if self.options.get('callback') is not None:
                 cb.append(self.options.pop('callback'))
             model_instance = model(pylops.MatrixMult(A), callbacks=cb)
@@ -240,3 +267,43 @@ class CallbackISTA(pylops.optimization.callback.Callbacks):
             print(f"Converged at iteration {solver.iiter} with rres={rres:.2e} < rtol={self.rtol:.2e}")
             self.stop = True
 
+
+class PositivityCallback(pylops.optimization.callback.Callbacks):
+    """
+    Callback to enforce non-negativity constraint on the solution during optimization.
+    """
+    def on_step_end(self, solver, x):
+        x = np.maximum(x, 0)  # Enforce non-negativity
+
+
+class NNLSProjLandweber(SolverBase):
+
+    positive = Bool(True)  # whether to enforce non-negativity constraint on the solution
+
+    def solve(self, A, y, x, index):
+        if self.options.get('stol') is not None:
+            stol = self.options.pop('stol')
+        else:
+            stol = 1e-10
+        if self.options.get('rtol') is not None:
+            rtol = self.options.pop('rtol')
+        else:
+            rtol = 1e-10
+        
+        cb = []
+        if self.positive:
+            cb.append(PositivityCallback())
+        cb1 = CallbackISTA(stol=stol, rtol=rtol)
+        cb.append(cb1)
+        if self.options.get('callback') is not None:
+            cb.append(self.options.pop('callback'))
+        model_instance = pylops.optimization.sparsity.ISTA(pylops.MatrixMult(A), callbacks=cb)
+        xhat, ntotal, cost = model_instance.solve(y, eps=0.0, **self.options)
+        self.output = {index:{
+            'ntotal': ntotal,
+            'cost': cost,
+            'r_cost': cb1.r_cost,
+            's_cost': cb1.s_cost,
+            'res_cost': cb1.cost
+        }}
+        return xhat.squeeze()
