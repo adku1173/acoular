@@ -73,7 +73,8 @@ from traits.api import (
     cached_property,
     observe,
     property_depends_on,
-    Union
+    Union, 
+    Callable,
 )
 from traits.trait_errors import TraitError
 
@@ -1389,6 +1390,8 @@ class BeamformerCleansc(BeamformerBase):
     #: iteration stops if power[i]>power[i-stopn]
     #: defaults to 3
     stopn = Int(3)
+
+    callback = Callable()
 
     #: A unique identifier for the beamformer, based on its properties. (read-only)
     digest = Property(depends_on=BEAMFORMER_BASE_DIGEST_DEPENDENCIES + ['n_iter', 'damp', 'stopn'])

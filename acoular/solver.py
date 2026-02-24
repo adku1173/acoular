@@ -1,7 +1,5 @@
 
 
-from requests import options
-
 import numpy as np
 
 # check for sklearn version to account for incompatible behavior
@@ -17,7 +15,8 @@ from traits.api import (
     Union,
     Property,
     cached_property,
-    Bool
+    Bool,
+    Instance
 )
 from traits.trait_errors import TraitError
 from scipy.linalg import solve
@@ -41,9 +40,10 @@ if config.have_pylops:
 
 class SolverBase(HasStrictTraits):
 
-    output = Any  # for storing the result of the solver, e.g., for debugging or analysis    
+    output = Dict  # for storing the result of the solver, e.g., for debugging or analysis    
     options = Dict  # for storing options for the solver, e.g., for debugging or analysis
-    digest = Property(depends_on=['options'])
+    callback = Union(None, Any)
+    digest = Property(depends_on=['options','callback'])
 
     @cached_property
     def _get_digest(self):
@@ -56,7 +56,7 @@ class SolverBase(HasStrictTraits):
 class GaussSeidelSolver(SolverBase):
 
     options = Dict({
-        'niter': 100, 'damp': 1.0, 'callback': None, 'stol1': 1e-10, 'stol': 1e-10, 'rtol': 1e-10})
+        'niter': 100, 'damp': 1.0, 'stol1': 1e-10, 'stol': 1e-10, 'rtol': 1e-10})
 
     def solve(self, A, y, x, index=None):
         niter = self.options.get('niter', 100)
@@ -65,11 +65,6 @@ class GaussSeidelSolver(SolverBase):
         stol1 = self.options.get('stol1', 1e-10)
         rtol = self.options.get('rtol', 1e-10)
         ngrid = A.shape[1]
-        if self.options.get('callback') is not None:
-            callback = self.options['callback']
-            have_callback = True
-        else:
-            have_callback = False
         cost = []
         s_cost = []
         s1_cost = []
@@ -78,8 +73,8 @@ class GaussSeidelSolver(SolverBase):
         for i in range(niter):
             x_old = x.copy()
             x = damasSolverGaussSeidel(A, y, ngrid, damp, x)
-            if have_callback:
-                callback(x)
+            if self.callback is not None:
+                self.callback(x)
 
             res = np.linalg.norm(A@x - y)
             sres = np.linalg.norm(x - x_old) / np.linalg.norm(x)
@@ -114,7 +109,7 @@ class SBLSolver(SolverBase):
     method = Enum('SBL', 'SBL1', 'M-SBL')
 
     options = Dict({
-        'niter': 100, 'callback': None, 'stol': 1e-17, 'stol1': 1e-10, 'grange': 1e-3, 'nsources': None, 'sig_sq': None
+        'niter': 100, 'stol': 1e-17, 'stol1': 1e-10, 'grange': 1e-3, 'nsources': None, 'sig_sq': None
         })
 
     def estimate_noise_power(self, gamma, csm, a):
@@ -215,6 +210,9 @@ class SBLSolver(SolverBase):
                 warn(f'Negative gamma values at iteration {i+1}, setting to zero.')
                 gamma[gamma < 0] = 0
 
+            if self.callback is not None:
+                self.callback(gamma)
+
             # new noise estimate
             if estimate_noise_variance:
                 sig_sq_est = np.minimum(self.estimate_noise_power(gamma, csm, A), max_sig_sq)
@@ -251,19 +249,23 @@ class ISTACV(SolverBase):
 
         method = Enum('ISTA', 'FISTA')
 
+        callback = Union(None, Instance(pylops.optimization.callback.Callbacks))  # callback function for iterations, e.g., for debugging or analysis
+
         #: Number of grid points for cross-validation
         num_grid = Int(20) 
 
         #: Ratio of regularization parameter to the maximum value
         reg_ratio = Float(1e-3)  
 
-        #: Number of cross-validation folds
-        cv = Int(5)  
-
         #: Random seed for reproducibility
         seed = Int(42)
 
+        #: Number of cross-validation folds
+        cv = Int(5)  
+
         cv_options = Union(None, Dict)  # for storing options for cross-validation, e.g., for debugging or analysis
+
+        cv_callback = Union(None, Instance(pylops.optimization.callback.Callbacks))  # callback function for cross-validation iterations, e.g., for debugging or analysis
 
         warm_start = Bool(True)  # whether to use the solution from the previous regularization parameter as the initial guess for the next one
 
@@ -310,8 +312,8 @@ class ISTACV(SolverBase):
                     cb.append(
                         CallbackISTA(stol=stol,rtol=rtol)
                     )
-                    if options.get('callback') is not None:
-                        cb.append(options.pop('callback'))
+                    if self.cv_callback is not None:
+                        cb.append(self.cv_callback)
                     model_instance = model(pylops.MatrixMult(Optr), callbacks=cb)
                     xhat, _, _ = model_instance.solve(ytr,eps=eps, x0=x0, **options)
 
@@ -357,8 +359,8 @@ class ISTACV(SolverBase):
                 stol1 = 1e-10
             cb1 = CallbackISTA(stol=stol, rtol=rtol, stol1=stol1)
             cb.append(cb1)
-            if self.options.get('callback') is not None:
-                cb.append(self.options.pop('callback'))
+            if self.callback is not None:
+                cb.append(self.callback)
             model_instance = model(pylops.MatrixMult(A), callbacks=cb)
             xhat, ntotal, cost = model_instance.solve(y, eps=eps, **self.options)
             self.output = {index:{
@@ -439,6 +441,8 @@ class NNLSProjLandweber(SolverBase):
 
     positive = Bool(True)  # whether to enforce non-negativity constraint on the solution
 
+    callback = Union(None, Instance(pylops.optimization.callback.Callbacks))  # callback function for iterations, e.g., for debugging or analysis
+
     def solve(self, A, y, x, index):
         if self.options.get('stol') is not None:
             stol = self.options.pop('stol')
@@ -457,8 +461,8 @@ class NNLSProjLandweber(SolverBase):
             cb.append(PositivityCallback())
         cb1 = CallbackISTA(stol=stol, rtol=rtol, stol1=stol1)
         cb.append(cb1)
-        if self.options.get('callback') is not None:
-            cb.append(self.options.pop('callback'))
+        if self.callback is not None:
+            cb.append(self.callback)
         model_instance = pylops.optimization.sparsity.ISTA(pylops.MatrixMult(A), callbacks=cb)
         xhat, ntotal, cost = model_instance.solve(y, eps=0.0, **self.options)
         self.output = {index:{
