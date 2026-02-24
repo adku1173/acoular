@@ -75,6 +75,8 @@ from traits.api import (
     observe,
     property_depends_on,
     Str
+    Callable,
+    Union
 )
 from traits.trait_errors import TraitError
 
@@ -83,7 +85,7 @@ from .base import SpectraOut
 from .fprocess import AutoPowerSpectra
 from .configuration import config
 from .environments import Environment
-from .fastFuncs import beamformerFreq, calcPointSpreadFunction, calcTransfer, damasSolverGaussSeidel
+from .fastFuncs import beamformerFreq, calcPointSpreadFunction, calcTransfer
 from .grids import Grid, Sector
 from .h5cache import H5cache
 from .h5files import H5CacheFileBase
@@ -92,6 +94,7 @@ from .microphones import MicGeom
 from .spectra import PowerSpectra
 from .tfastfuncs import _steer_I, _steer_II, _steer_III, _steer_IV
 from .tools.utils import synthetic_indices
+from .solver import SolverBase, GaussSeidelSolver
 
 sklearn_ndict = {}
 if parse(sklearn.__version__) < parse('1.4'):
@@ -1115,15 +1118,10 @@ class BeamformerDamas(BeamformerBase):
 
     See :cite:`Brooks2006` for details.
     """
+    solver = Instance(SolverBase, GaussSeidelSolver())
 
     #: The floating-number-precision of the PSFs. Default is 64 bit.
     psf_precision = Enum('float64', 'float32')
-
-    #: Number of iterations, defaults to 100.
-    n_iter = Int(100)
-
-    #: Damping factor in modified gauss-seidel
-    damp = Float(1.0)
 
     #: Flag that defines how to calculate and store the point spread function
     #: defaults to 'single'.
@@ -1140,7 +1138,7 @@ class BeamformerDamas(BeamformerBase):
 
     #: A unique identifier for the beamformer, based on its properties. (read-only)
     digest = Property(
-        depends_on=BEAMFORMER_BASE_DIGEST_DEPENDENCIES + ['n_iter', 'damp', 'psf_precision'],
+        depends_on=BEAMFORMER_BASE_DIGEST_DEPENDENCIES + ['solver.digest', 'psf_precision'],
     )
 
     @cached_property
@@ -1170,6 +1168,7 @@ class BeamformerDamas(BeamformerBase):
         p = PointSpreadFunction(steer=self.steer, calcmode=self.calcmode, precision=self.psf_precision)
         param_steer_type, steer_vector = self._beamformer_params()
         for i in ind:
+            p.freq = f[i]
             csm = np.array(self.freq_data.csm[i], dtype='complex128')
             y = beamformerFreq(
                 param_steer_type,
@@ -1181,10 +1180,8 @@ class BeamformerDamas(BeamformerBase):
             if self.r_diag:  # set (unphysical) negative output values to 0
                 indNegSign = np.sign(y) < 0
                 y[indNegSign] = 0.0
-            x = y.copy()
-            p.freq = f[i]
-            psf = p.psf[:]
-            damasSolverGaussSeidel(psf, y, self.n_iter, self.damp, x)
+            x0 = y.copy()  # initial guess for solver
+            x = self.solver.solve(p.psf[:], y, x0, index=i)
             self._ac[i] = x
             self._fr[i] = 1
 
@@ -1569,6 +1566,7 @@ class BeamformerClean(BeamformerBase):
             self._fr[i] = 1
 
 
+
 class BeamformerCMF(BeamformerBase):
     """
     Covariance Matrix Fitting algorithm.
@@ -1576,6 +1574,8 @@ class BeamformerCMF(BeamformerBase):
     This is not really a beamformer, but an inverse method.
     See :cite:`Yardibi2008` for details.
     """
+
+    solver = Union(None,Instance(SolverBase))  # for custom solvers, e.g., from PyLops
 
     #: Type of fit method to be used ('LassoLars', 'LassoLarsBIC',
     #: 'OMPCV' or 'NNLS', defaults to 'LassoLars').
@@ -1590,6 +1590,7 @@ class BeamformerCMF(BeamformerBase):
         'fmin_l_bfgs_b',
         'Split_Bregman',
         'FISTA',
+        'custom',
     )
 
     #: Weight factor for LassoLars method,
@@ -1627,8 +1628,33 @@ class BeamformerCMF(BeamformerBase):
             'r_diag',
             'precision',
             'steer.inv_digest',
+            'solver',
         ],
     )
+
+    # private traits
+    msm_indices = Property(depends_on=['freq_data.num_channels', 'steer.digest', 'r_diag'])
+
+    @cached_property
+    def _get_msm_indices(self):
+        """
+        Get the indices for the reduced Kronecker product of the steering matrix.
+
+        These are the indices for the upper triangular part of the CSM, excluding the main diagonal if :attr:`r_diag` is True.
+        """
+        nc = self.freq_data.num_channels
+        # get indices for upper triangular matrices (use np.tril b/c transposed)
+        ind = np.reshape(np.tril(np.ones((nc, nc))), (nc * nc,)) > 0
+
+        ind_im0 = (np.reshape(np.eye(nc), (nc * nc,)) == 0)[ind]
+        if self.r_diag:
+            # omit main diagonal for noise reduction
+            ind_reim = np.hstack([ind_im0, ind_im0])
+        else:
+            # take all real parts -- also main diagonal
+            ind_reim = np.hstack([np.ones(np.size(ind_im0)) > 0, ind_im0])
+            ind_reim[0] = True  # why this ?
+        return ind, ind_reim
 
     @cached_property
     def _get_digest(self):
@@ -1642,6 +1668,28 @@ class BeamformerCMF(BeamformerBase):
                 f'Solver for {self.method} in BeamformerCMF not available.'
             )
             raise ImportError(msg)
+
+    def _calc_sensing_matrix(self, f):
+        ind, ind_reim = self.msm_indices
+        h = self.steer.transfer(f).T
+        nc = h.shape[0]
+        num_points = h.shape[1]
+
+        # reduced Kronecker product (only where solution matrix != 0)
+        Bc = (h[:, :, np.newaxis] * h.conjugate().T[np.newaxis, :, :]).transpose(2, 0, 1)
+        Ac = Bc.reshape(nc * nc, num_points)
+
+        A = Ac[ind, :]
+        A = np.vstack([A.real, A.imag])[ind_reim, :]
+        return A
+
+    def _vectorize_csm(self, csm):
+        ind, ind_reim = self.msm_indices
+        nc = csm.shape[-1]
+        R = np.reshape(csm.T, (nc * nc, 1))[ind, :]
+        R = np.vstack([R.real, R.imag])[ind_reim, :]
+        return R
+
 
     def _calc(self, ind):
         """
@@ -1662,41 +1710,26 @@ class BeamformerCMF(BeamformerBase):
         This method only returns values through :attr:`_ac` and :attr:`_fr`
         """
         f = self._f
-
-        # function to repack complex matrices to deal with them in real number space
-        def realify(matrix):
-            return np.vstack([matrix.real, matrix.imag])
-
-        # prepare calculation
-        nc = self.freq_data.num_channels
         num_points = self.steer.grid.size
         unit = self.unit_mult
 
         for i in ind:
             csm = np.array(self.freq_data.csm[i], dtype='complex128', copy=True)
+            A = self._calc_sensing_matrix(f[i])
+            R = self._vectorize_csm(csm) * unit
+            x0 = np.zeros((num_points,))
+            norms = spla.norm(A, axis=0)
+            A = A / norms
+            if self.method == 'custom':
+                self._ac[i] = self.solver.solve(A=A, y=R, x=x0, index=i) / norms / unit
+                self._fr[i] = 1
+                continue
 
-            h = self.steer.transfer(f[i]).T
+            # from sklearn 1.2, normalize=True does not work the same way anymore and the
+            # pipeline approach with StandardScaler does scale in a different way, thus we
+            # monkeypatch the code and normalize ourselves to make results the same over
+            # different sklearn versions
 
-            # reduced Kronecker product (only where solution matrix != 0)
-            Bc = (h[:, :, np.newaxis] * h.conjugate().T[np.newaxis, :, :]).transpose(2, 0, 1)
-            Ac = Bc.reshape(nc * nc, num_points)
-
-            # get indices for upper triangular matrices (use np.tril b/c transposed)
-            ind = np.reshape(np.tril(np.ones((nc, nc))), (nc * nc,)) > 0
-
-            ind_im0 = (np.reshape(np.eye(nc), (nc * nc,)) == 0)[ind]
-            if self.r_diag:
-                # omit main diagonal for noise reduction
-                ind_reim = np.hstack([ind_im0, ind_im0])
-            else:
-                # take all real parts -- also main diagonal
-                ind_reim = np.hstack([np.ones(np.size(ind_im0)) > 0, ind_im0])
-                ind_reim[0] = True  # why this ?
-
-            A = realify(Ac[ind, :])[ind_reim, :]
-            # use csm.T for column stacking reshape!
-            R = realify(np.reshape(csm.T, (nc * nc, 1))[ind, :])[ind_reim, :] * unit
-            # choose method
             if self.method == 'LassoLars':
                 model = LassoLars(alpha=self.alpha * unit, max_iter=self.n_iter, positive=True, **sklearn_ndict)
             elif self.method == 'LassoLarsBIC':
@@ -1726,7 +1759,7 @@ class BeamformerCMF(BeamformerBase):
                     tau=1.0,
                     show=self.show,
                 )
-                self._ac[i] /= unit
+                self._ac[i] /= (unit * norms)  # recover normalization and unit scaling
 
             elif self.method == 'FISTA' and config.have_pylops:
                 from pylops import MatrixMult
@@ -1742,7 +1775,7 @@ class BeamformerCMF(BeamformerBase):
                     tol=1e-10,
                     show=self.show,
                 )
-                self._ac[i] /= unit
+                self._ac[i] /= (unit * norms)  # recover normalization and unit scaling
             elif self.method == 'fmin_l_bfgs_b':
                 # function to minimize
                 def function(x):
@@ -1775,18 +1808,13 @@ class BeamformerCMF(BeamformerBase):
                     maxls=20,
                 )
 
-                self._ac[i] /= unit
+                self._ac[i] /= (unit * norms)  # recover normalization and unit scaling
             else:
-                # from sklearn 1.2, normalize=True does not work the same way anymore and the
-                # pipeline approach with StandardScaler does scale in a different way, thus we
-                # monkeypatch the code and normalize ourselves to make results the same over
-                # different sklearn versions
-                norms = spla.norm(A, axis=0)
                 # get rid of sklearn warnings that appear for sklearn<1.2 despite any settings
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore', category=FutureWarning)
                     # normalized A
-                    model.fit(A / norms, R[:, 0])
+                    model.fit(A, R[:, 0])
                 # recover normalization in the coef's
                 self._ac[i] = model.coef_[:] / norms / unit
             self._fr[i] = 1

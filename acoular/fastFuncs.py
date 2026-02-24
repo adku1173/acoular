@@ -792,7 +792,7 @@ def _psf_Formulation4AkaTrueLocation(
     cache=CACHED_OPTION,
     fastmath=FAST_OPTION,
 )
-def damasSolverGaussSeidel(A, dirtyMap, nIterations, relax, damasSolution):
+def damasSolverGaussSeidel(A, y, n_grid, damp, x):
     """
     Solves the DAMAS inverse problem via modified gauss seidel.
 
@@ -802,32 +802,30 @@ def damasSolverGaussSeidel(A, dirtyMap, nIterations, relax, damasSolution):
     ----------
     A : float32/float64[nFreqs, nGridpoints, nGridpoints] (or float64[...])
         The PSF build matrix (see :ref:`Brooks and Humphreys, 2006<BrooksHumphreys2006>`)
-    dirtyMap : float32/float64[nFreqs, nGridpoints] (or float64[...])
+    y : float32/float64[nFreqs, nGridpoints] (or float64[...])
         The conventional beamformer map
-    nIterations : int64[scalar]
-        number of Iterations the damas solver has to go through
-    relax : int64[scalar]
-        relaxation parameter (=1.0 in :ref:`Brooks and Humphreys, 2006<BrooksHumphreys2006>`)
-    damasSolution : float32/float64[nFreqs, nGridpoints] (or float64[...])
+    damp : int64[scalar]
+        damping parameter (=1.0 in :ref:`Brooks and Humphreys, 2006<BrooksHumphreys2006>`)
+    n_grid : int64[scalar]
+        number of grid points in the problem
+    x : float32/float64[nFreqs, nGridpoints] (or float64[...])
         starting solution
 
     Returns
     -------
-    None : as damasSolution is overwritten with end result of the damas iterative solver.
+    None : as x is overwritten with end result of the damas iterative solver.
 
     """
-    nGridPoints = len(dirtyMap)
-    for _cntIter in range(nIterations[0]):
-        for cntGrid in range(nGridPoints):
-            solHelp = 0.0
-            for cntGridHelp in range(nGridPoints):  # full sum
-                solHelp += A[cntGrid, cntGridHelp] * damasSolution[cntGridHelp]
-            solHelp -= A[cntGrid, cntGrid] * damasSolution[cntGrid]
-            solHelp = (1 - relax[0]) * damasSolution[cntGrid] + relax[0] * (dirtyMap[cntGrid] - solHelp)
-            if solHelp > 0.0:
-                damasSolution[cntGrid] = solHelp
-            else:
-                damasSolution[cntGrid] = 0.0
+    for cntGrid in range(n_grid[0]):
+        solHelp = 0.0
+        for cntGridHelp in range(n_grid[0]):  # full sum
+            solHelp += A[cntGrid, cntGridHelp] * x[cntGridHelp]
+        solHelp -= A[cntGrid, cntGrid] * x[cntGrid]
+        solHelp = (1 - damp[0]) * x[cntGrid] + damp[0] * (y[cntGrid] - solHelp)
+        if solHelp > 0.0:
+            x[cntGrid] = solHelp
+        else:
+            x[cntGrid] = 0.0
 
 
 # %% Transfer - Function

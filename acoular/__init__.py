@@ -95,6 +95,9 @@ from .sources import (
     TimeSamples,
     UncorrelatedNoiseSource,
 )
+
+from .solver import SolverBase, ISTACV, GaussSeidelSolver
+
 from .tools.helpers import synthetic
 from .spectra import BaseSpectra, PowerSpectra, PowerSpectraImport
 from .spectra import PowerSpectra as EigSpectra
