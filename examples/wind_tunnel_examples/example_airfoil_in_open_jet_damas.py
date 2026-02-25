@@ -74,7 +74,7 @@ sbl = ac.BeamformerSBL(source=mf, steer=st, num_snapshots=-1)
 import matplotlib.pyplot as plt
 
 
-methods = ['GaussSeidel', 'NNLS', 'FISTA', 'SBL1'][::-1]
+methods = ['NNLS', 'GaussSeidel', 'FISTA', 'SBL1']
 s_metrics = {}
 r_metrics = {}
 s1_metrics = {}

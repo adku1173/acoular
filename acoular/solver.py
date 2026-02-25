@@ -434,7 +434,13 @@ class PositivityCallback(pylops.optimization.callback.Callbacks):
     Callback to enforce non-negativity constraint on the solution during optimization.
     """
     def on_step_end(self, solver, x):
-        x = np.maximum(x, 0)  # Enforce non-negativity
+        x[...] = np.maximum(x, 0)  # Enforce non-negativity
+        return x
+
+    def on_step_begin(self, solver, x):
+        x[...] = np.maximum(x, 0)  # Enforce non-negativity
+        return x
+
 
 
 class NNLSProjLandweber(SolverBase):
@@ -463,6 +469,7 @@ class NNLSProjLandweber(SolverBase):
         cb.append(cb1)
         if self.callback is not None:
             cb.append(self.callback)
+        cb = cb[::-1] # pylops calls callbacks in reverse order
         model_instance = pylops.optimization.sparsity.ISTA(pylops.MatrixMult(A), callbacks=cb)
         xhat, ntotal, cost = model_instance.solve(y, eps=0.0, **self.options)
         self.output = {index:{

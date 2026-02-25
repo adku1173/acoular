@@ -65,9 +65,10 @@ b = ac.BeamformerCMF(freq_data=f, steer=st, alpha=1e-8)
 import matplotlib.pyplot as plt
 
 
-methods = ['NNLS', 'FISTA', 'ISTA','OMPCV'][::-1]
+methods = ['NNLS', 'FISTA', 'ISTA','OMPCV']
 s_metrics = {}
 r_metrics = {}
+s1_metrics = {}
 
 plt.figure(1, (10, 4))
 i1 = 1
@@ -76,14 +77,19 @@ for method in methods:
     if method in ['FISTA','ISTA']:
         b.method = 'custom'
         b.solver = ac.ISTACV(method=method, num_grid=10, cv=5, seed=42, warm_start=True,
-                             options={'niter': 5000, 'tol': 1e-17}, 
-                             cv_options={'niter': 5000, 'tol': 1e-17}
+                             options={'niter': 10000, 'tol': 1e-32, 'stol': 1e-32, 'stol1': 1e-32}, 
+                             cv_options={'niter': 10000, 'tol': 1e-32, 'stol': 1e-32, 'stol1': 1e-32}
                              )
         map = b.synthetic(cfreq, 0)
         title = method
         ind = list(b.solver.output.keys())[0]
         s_metrics[method] = b.solver.output[ind].get('s_cost')
         r_metrics[method] = b.solver.output[ind].get('r_cost')
+    elif method == 'NNLS':
+        b.method = 'custom'
+        b.solver = ac.NNLSProjLandweber(options={'niter': 10000, 'tol': 1e-32, 'stol': 1e-32, 'stol1': 1e-32})
+        map = b.synthetic(cfreq, 0)
+        title = method
     else:
         b.method = method
         map = b.synthetic(cfreq, 0)
@@ -97,16 +103,26 @@ for method in methods:
     plt.title(title)
 
 
+    if method in ['FISTA','ISTA', 'NNLS']:
+        ind = list(b.solver.output.keys())[0]
+        s_metrics[method] = b.solver.output[ind].get('s_cost')
+        r_metrics[method] = b.solver.output[ind].get('r_cost')
+        s1_metrics[method] = b.solver.output[ind].get('s1_cost')
+
+
 plt.tight_layout()
 plt.show()
 
 
-fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharex=False)
-for method in ['FISTA', 'ISTA']:
+
+fig, axes = plt.subplots(1, 3, figsize=(10, 4), sharex=False)
+for method in ['ISTA', 'FISTA', 'NNLS']:
     if s_metrics[method] is not None:
         axes[0].plot(s_metrics[method], label=method)
     if r_metrics[method] is not None:
         axes[1].plot(r_metrics[method], label=method)
+    if s1_metrics[method] is not None:
+        axes[2].plot(s1_metrics[method], label=method)
 
 axes[0].set_title("eps_s")
 axes[0].set_xlabel("Iteration")
@@ -120,8 +136,15 @@ axes[1].set_ylabel("eps_r")
 axes[1].set_yscale('log')
 axes[1].legend()
 
+axes[2].set_title("eps_s1")
+axes[2].set_xlabel("Iteration")
+axes[2].set_ylabel("eps_s1")
+axes[2].set_yscale('log')
+axes[2].legend()
+
 fig.tight_layout()
 plt.show()
+
 
 
 # %%
