@@ -74,7 +74,9 @@ sbl = ac.BeamformerSBL(source=mf, steer=st, num_snapshots=-1)
 import matplotlib.pyplot as plt
 
 
-methods = ['NNLS', 'GaussSeidel', 'FISTA', 'SBL1']
+methods = ['FISTA', 'NNLS', 'GaussSeidel', 'SBL1']
+methods = ['NNLS']
+
 s_metrics = {}
 r_metrics = {}
 s1_metrics = {}
@@ -100,15 +102,15 @@ for method in methods:
 
     elif method in ['FISTA','ISTA']:
         b.solver = ac.ISTACV(method=method, num_grid=10, cv=5, seed=42, warm_start=True,
-                             options={'niter': 5000, 'tol': 1e-17, 'stol': 1e-6}, 
-                             cv_options={'niter': 5000, 'tol': 1e-17}
+                             options={'niter': 5000}, 
+                             cv_options={'niter': 5000}
                              )
         map = b.synthetic(cfreq, 0)
     elif method == 'NNLS':
-        b.solver = ac.NNLSProjLandweber(options={'niter': 5000, 'tol': 1e-32, 'stol': 1e-6})
+        b.solver = ac.NNLSProjLandweber(options={'niter': 10000})
         map = b.synthetic(cfreq, 0)
     else:
-        b.solver = ac.GaussSeidelSolver(options={'niter': 5000, 'stol': 1e-6})
+        b.solver = ac.GaussSeidelSolver(options={'niter': 5000})
         map = b.synthetic(cfreq, 0)
     
     plt.subplot(1, len(methods), i1)

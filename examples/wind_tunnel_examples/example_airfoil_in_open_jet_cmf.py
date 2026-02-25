@@ -77,8 +77,8 @@ for method in methods:
     if method in ['FISTA','ISTA']:
         b.method = 'custom'
         b.solver = ac.ISTACV(method=method, num_grid=10, cv=5, seed=42, warm_start=True,
-                             options={'niter': 10000, 'tol': 1e-32, 'stol': 1e-32, 'stol1': 1e-32}, 
-                             cv_options={'niter': 10000, 'tol': 1e-32, 'stol': 1e-32, 'stol1': 1e-32}
+                             options={'niter': 10000}, 
+                             cv_options={'niter': 10000}
                              )
         map = b.synthetic(cfreq, 0)
         title = method
@@ -87,7 +87,7 @@ for method in methods:
         r_metrics[method] = b.solver.output[ind].get('r_cost')
     elif method == 'NNLS':
         b.method = 'custom'
-        b.solver = ac.NNLSProjLandweber(options={'niter': 10000, 'tol': 1e-32, 'stol': 1e-32, 'stol1': 1e-32})
+        b.solver = ac.NNLSProjLandweber(options={'niter': 10000})
         map = b.synthetic(cfreq, 0)
         title = method
     else:

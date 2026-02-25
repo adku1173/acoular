@@ -16,7 +16,8 @@ from traits.api import (
     Property,
     cached_property,
     Bool,
-    Instance
+    Instance,
+    List
 )
 from traits.trait_errors import TraitError
 from scipy.linalg import solve
@@ -249,7 +250,11 @@ class ISTACV(SolverBase):
 
         method = Enum('ISTA', 'FISTA')
 
-        callback = Union(None, Instance(pylops.optimization.callback.Callbacks))  # callback function for iterations, e.g., for debugging or analysis
+        callback = Union(
+            None, 
+            Instance(pylops.optimization.callback.Callbacks),
+            List(Instance(pylops.optimization.callback.Callbacks)))  
+            # callback function for iterations, e.g., for debugging or analysis
 
         #: Number of grid points for cross-validation
         num_grid = Int(20) 
@@ -273,20 +278,6 @@ class ISTACV(SolverBase):
 
         def grid_search(self, A, y, x0, reg, model):
             options = self.cv_options if self.cv_options is not None else self.options
-            if options.get('stol') is not None:
-                stol = options.pop('stol')
-            else:
-                stol = 1e-10
-            if options.get('rtol') is not None:
-                rtol = options.pop('rtol')         
-            else:
-                rtol = 1e-10
-            if options.get('stol1') is not None:
-                stol1 = options.pop('stol1')
-            else:
-                stol1 = 1e-10
-
-
             y = np.asarray(y).ravel()
             M = y.size
             kf = sklearn.model_selection.KFold(n_splits=self.cv, shuffle=True, random_state=self.seed)
@@ -309,11 +300,11 @@ class ISTACV(SolverBase):
                     cb = []
                     if self.positive:
                         cb.append(PositivityCallback())
-                    cb.append(
-                        CallbackISTA(stol=stol,rtol=rtol)
-                    )
                     if self.cv_callback is not None:
-                        cb.append(self.cv_callback)
+                        if isinstance(self.cv_callback, list):
+                            cb.extend(self.cv_callback)
+                        else:
+                            cb.append(self.cv_callback)
                     model_instance = model(pylops.MatrixMult(Optr), callbacks=cb)
                     xhat, _, _ = model_instance.solve(ytr,eps=eps, x0=x0, **options)
 
@@ -344,88 +335,141 @@ class ISTACV(SolverBase):
             cb = []
             if self.positive:
                 cb.append(PositivityCallback())
-            # pop if included
-            if self.options.get('stol') is not None:
-                stol = self.options.pop('stol')
-            else:
-                stol = 1e-10
-            if self.options.get('rtol') is not None:
-                rtol = self.options.pop('rtol')
-            else:                
-                rtol = 1e-10
-            if self.options.get('stol1') is not None:
-                stol1 = self.options.pop('stol1')
-            else:
-                stol1 = 1e-10
-            cb1 = CallbackISTA(stol=stol, rtol=rtol, stol1=stol1)
-            cb.append(cb1)
             if self.callback is not None:
-                cb.append(self.callback)
+                if isinstance(self.callback, list):
+                    cb.extend(self.callback)
+                else:
+                    cb.append(self.callback)
+            cb = cb[::-1] # reverse order so that main callback is last and thus called first in pylops
             model_instance = model(pylops.MatrixMult(A), callbacks=cb)
             xhat, ntotal, cost = model_instance.solve(y, eps=eps, **self.options)
-            self.output = {index:{
+            
+            # Build output dict with available cost data
+            output_dict = {
                 'ntotal': ntotal,
                 'cost': cost,
                 'eps': eps,
-                'r_cost': cb1.r_cost,
-                's_cost': cb1.s_cost,
-                's1_cost': cb1.s1_cost,
-                'res_cost': cb1.cost
-
-            }}
+            }
+            self.output = {index: output_dict}
             return xhat.squeeze()
         
 
-class CallbackISTA(pylops.optimization.callback.Callbacks):
+class CallbackBase(pylops.optimization.callback.Callbacks):
     """
-    see also:https://pylops.readthedocs.io/en/v2.5.0/tutorials/classsolvers.html#sphx-glr-tutorials-classsolvers-py
+    Base class for callbacks that monitor convergence during optimization.
+    
+    Attributes
+    ----------
+    tol : float
+        Tolerance for convergence criterion
+    cost : list
+        List to store the cost values at each iteration
+    stop : bool
+        Flag to indicate if the solver should stop
     """
-    def __init__(self, stol=1e-10, rtol=1e-10, stol1=1e-10):
-        self.stol = stol
-        self.rtol = rtol
-        self.stol1 = stol1
+    def __init__(self, tol=1e-10):
+        self.tol = tol
         self.cost = []
-        self.s_cost = []
-        self.s1_cost = []
-        self.r_cost = []
         self.stop = False
 
+
+class SolutionResidualCallback(CallbackBase):
+    """
+    Callback to monitor convergence based on solution residual (L2 norm).
+    
+    Monitors the relative change in the solution vector between iterations
+    using the L2 norm: ||x - x_old|| / ||x||
+    
+    Attributes
+    ----------
+    tol : float
+        Tolerance for solution residual convergence
+    """
     def on_run_begin(self, solver, x):
-        """Callback before entire solver run
-
-        Parameters
-        ----------
-        solver : :obj:`pylops.optimization.basesolver.Solver`
-            Solver object
-        x : :obj:`numpy.ndarray`
-            Current model vector
-
-        """
-        self.y_norm = np.linalg.norm(solver.y)
         self.x0 = x.copy()
-
+    
     def on_step_end(self, solver, x):
         if solver.iiter <= 1:
             self.xold = self.x0
-            return  # skip first iteration since it is just the initial guess
-        res = np.linalg.norm(solver.Op @ x - solver.y)
+            return
         sres = np.linalg.norm(x - self.xold) / np.linalg.norm(x)
-        sres1 = np.linalg.norm(x - self.xold, ord=1) / np.linalg.norm(self.xold, ord=1)
-        rres = res / self.y_norm
-        if self.xold is not None:
-            self.cost.append(res)
-            self.s_cost.append(sres)
-            self.s1_cost.append(sres1)
-            self.r_cost.append(rres)
+        self.cost.append(sres)
         self.xold = x
-        if sres < self.stol:
-            print(f"Converged at iteration {solver.iiter} with sres={sres:.2e} < stol={self.stol:.2e}")
+        if sres < self.tol:
+            print(f"Converged at iteration {solver.iiter} with sres={sres:.2e} < tol={self.tol:.2e}")
             self.stop = True
-        if rres < self.rtol:
-            print(f"Converged at iteration {solver.iiter} with rres={rres:.2e} < rtol={self.rtol:.2e}")
+
+
+class SolutionResidualL1Callback(CallbackBase):
+    """
+    Callback to monitor convergence based on solution residual (L1 norm).
+    
+    Monitors the relative change in the solution vector between iterations
+    using the L1 norm: ||x - x_old||_1 / ||x_old||_1
+    
+    Attributes
+    ----------
+    tol : float
+        Tolerance for L1 solution residual convergence
+    """
+    def on_run_begin(self, solver, x):
+        self.x0 = x.copy()
+    
+    def on_step_end(self, solver, x):
+        if solver.iiter <= 1:
+            self.xold = self.x0
+            return
+        sres1 = np.linalg.norm(x - self.xold, ord=1) / np.linalg.norm(self.xold, ord=1)
+        self.cost.append(sres1)
+        self.xold = x
+        if sres1 < self.tol:
+            print(f"Converged at iteration {solver.iiter} with sres1={sres1:.2e} < tol={self.tol:.2e}")
             self.stop = True
-        if sres1 < self.stol1:
-            print(f"Converged at iteration {solver.iiter} with sres1={sres1:.2e} < stol1={self.stol1:.2e}")
+
+
+class RelativeResidualCallback(CallbackBase):
+    """
+    Callback to monitor convergence based on relative residual.
+    
+    Monitors the relative residual: ||A @ x - y|| / ||y||
+    
+    Attributes
+    ----------
+    tol : float
+        Tolerance for relative residual convergence
+    """
+    def on_run_begin(self, solver, x):
+        self.y_norm = np.linalg.norm(solver.y)
+    
+    def on_step_end(self, solver, x):
+        if solver.iiter <= 1:
+            return
+        res = np.linalg.norm(solver.Op @ x - solver.y)
+        rres = res / self.y_norm
+        self.cost.append(rres)
+        if rres < self.tol:
+            print(f"Converged at iteration {solver.iiter} with rres={rres:.2e} < tol={self.tol:.2e}")
+            self.stop = True
+
+
+class AbsoluteResidualCallback(CallbackBase):
+    """
+    Callback to monitor absolute residual.
+    
+    Monitors the absolute residual: ||A @ x - y||
+    
+    Attributes
+    ----------
+    tol : float
+        Tolerance for absolute residual
+    """
+    def on_step_end(self, solver, x):
+        if solver.iiter <= 1:
+            return
+        res = np.linalg.norm(solver.Op @ x - solver.y)
+        self.cost.append(res)
+        if res < self.tol:
+            print(f"Converged at iteration {solver.iiter} with res={res:.2e} < tol={self.tol:.2e}")
             self.stop = True
 
 
@@ -433,9 +477,9 @@ class PositivityCallback(pylops.optimization.callback.Callbacks):
     """
     Callback to enforce non-negativity constraint on the solution during optimization.
     """
-    def on_step_end(self, solver, x):
-        x[...] = np.maximum(x, 0)  # Enforce non-negativity
-        return x
+    # def on_step_end(self, solver, x):
+    #     x[...] = np.maximum(x, 0)  # Enforce non-negativity
+    #     return x
 
     def on_step_begin(self, solver, x):
         x[...] = np.maximum(x, 0)  # Enforce non-negativity
@@ -447,36 +491,30 @@ class NNLSProjLandweber(SolverBase):
 
     positive = Bool(True)  # whether to enforce non-negativity constraint on the solution
 
-    callback = Union(None, Instance(pylops.optimization.callback.Callbacks))  # callback function for iterations, e.g., for debugging or analysis
+    callback = Union(
+        None, 
+        Instance(pylops.optimization.callback.Callbacks), 
+        List(pylops.optimization.callback.Callbacks))  # callback function for iterations, e.g., for debugging or analysis
 
     def solve(self, A, y, x, index):
-        if self.options.get('stol') is not None:
-            stol = self.options.pop('stol')
-        else:
-            stol = 1e-10
-        if self.options.get('rtol') is not None:
-            rtol = self.options.pop('rtol')
-        else:
-            rtol = 1e-10
-        if self.options.get('stol1') is not None:
-            stol1 = self.options.pop('stol1')
-        else:            
-            stol1 = 1e-10
         cb = []
         if self.positive:
             cb.append(PositivityCallback())
-        cb1 = CallbackISTA(stol=stol, rtol=rtol, stol1=stol1)
-        cb.append(cb1)
+
         if self.callback is not None:
-            cb.append(self.callback)
+            if isinstance(self.callback, list):
+                cb.extend(self.callback)
+            else:
+                cb.append(self.callback)
+        
         cb = cb[::-1] # pylops calls callbacks in reverse order
         model_instance = pylops.optimization.sparsity.ISTA(pylops.MatrixMult(A), callbacks=cb)
         xhat, ntotal, cost = model_instance.solve(y, eps=0.0, **self.options)
-        self.output = {index:{
+        
+        # Build output dict with available cost data
+        output_dict = {
             'ntotal': ntotal,
             'cost': cost,
-            'r_cost': cb1.r_cost,
-            's_cost': cb1.s_cost,
-            's1_cost': cb1.s1_cost,
-        }}
+        }
+        self.output = {index: output_dict}
         return xhat.squeeze()
