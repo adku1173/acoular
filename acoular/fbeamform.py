@@ -1592,6 +1592,8 @@ class BeamformerCMF(BeamformerBase):
 
     solver = Union(None, Instance(LeastSquaresSolver))  # for custom solvers, e.g., from PyLops
 
+    output = Any()
+
     #: Type of fit method to be used ('LassoLars', 'LassoLarsBIC',
     #: 'OMPCV' or 'NNLS', defaults to 'LassoLars').
     #: These methods are implemented in
@@ -1804,6 +1806,9 @@ class BeamformerCMF(BeamformerBase):
         # recover normalization in the coef's
         self._ac[i] = model.coef_[:] / norms / unit
         self._fr[i] = 1
+
+        if self.method in ['LassoLars', 'LassoLarsBIC']:
+            self.output = model.alpha_ * A.shape[0]
 
     def _calc_default_fmin_l_bfgs_b(self, i, A, R, norms, unit):  # noqa: N803
         """
