@@ -27,6 +27,9 @@ GRIDS_SKIP_DEFAULT = [
     ac.LineGrid,
     ac.ImportGrid,
     ac.MergeGrid,
+    ac.CG2,
+    ac.DRAE,
+    ac.DRPE,
     ac.BeamformerAdaptiveGrid,
     ac.BeamformerGridlessOrth,
 ]
@@ -59,6 +62,26 @@ class Grids:
 
     def case_ImportGrid(self):
         return ac.ImportGrid(pos=ac.RectGrid(x_min=-1, x_max=1, y_min=-1, y_max=1, z=1, increment=1).pos)
+
+    def case_CG2(self):
+        grid = ac.RectGrid(x_min=-1, x_max=1, y_min=-1, y_max=1, z=1, increment=1)
+        mics = ac.MicGeom(pos_total=np.array([[-0.15, 0.15], [0, 0], [0, 0]], dtype=float))
+        steer = ac.SteeringVector(grid=grid, mics=mics)
+        spectra = ac.PowerSpectraImport(csm=np.ones((1, 2, 2), dtype=complex), frequencies=2000.0)
+        return ac.CG2(steer=steer, freq_data=spectra, freq=2000)
+
+    def case_DRAE(self):
+        grid = ac.RectGrid(x_min=-1, x_max=1, y_min=-1, y_max=1, z=1, increment=1)
+        mics = ac.MicGeom(pos_total=np.array([[-0.2, 0, 0.2, 0], [0, -0.2, 0, 0.2], [0] * 4], dtype=float))
+        steer = ac.SteeringVector(grid=grid, mics=mics)
+        atom = steer.transfer(2000, ind=4)[0]
+        csm = np.outer(atom, atom.conj()) + 0.1 * np.eye(4)
+        spectra = ac.PowerSpectraImport(csm=csm[None], frequencies=2000.0)
+        return ac.DRAE(steer=steer, freq_data=spectra, freq=2000, n=1)
+
+    def case_DRPE(self):
+        grid = self.case_DRAE()
+        return ac.DRPE(steer=grid.steer, freq_data=grid.freq_data, freq=grid.freq, n=grid.n)
 
     def case_MergeGrid(self):
         return ac.MergeGrid(

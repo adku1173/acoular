@@ -62,7 +62,9 @@ def setup_beamformer_integrate(setup_power_spectra_integrate, setup_mics_integra
 
 def skip_or_fail(grid, sector):
     """Define conditions to skip or fail tests based on grid and sector types."""
-    if grid.__class__.__name__ in ['LineGrid', 'MergeGrid', 'ImportGrid'] and not isinstance(sector, ac.Sector):
+    if isinstance(grid, (ac.LineGrid, ac.MergeGrid, ac.ImportGrid, ac.CompressedGrid)) and not isinstance(
+        sector, ac.Sector
+    ):
         pytest.xfail(f'Grid {grid.__class__.__name__} has no indices method')
 
     if isinstance(grid, ac.RectGrid3D) and isinstance(sector, np.ndarray) and sector.shape[0] == 3:
