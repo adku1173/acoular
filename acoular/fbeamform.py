@@ -666,7 +666,7 @@ class BeamformerBase(AcoularBase):
         """
         if isinstance(sector, Sector):
             ind = self.steer.grid.subdomain(sector)
-        elif hasattr(self.steer.grid, 'indices'):
+        elif callable(getattr(self.steer.grid, 'indices', None)):
             ind = self.steer.grid.indices(*sector)
         else:
             msg = (
@@ -2414,7 +2414,7 @@ def integrate(data, grid, sector):
     """
     if isinstance(sector, Sector):
         ind = grid.subdomain(sector)
-    elif hasattr(grid, 'indices'):
+    elif callable(getattr(grid, 'indices', None)):
         ind = grid.indices(*sector)
     else:
         msg = (

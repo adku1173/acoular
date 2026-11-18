@@ -20,6 +20,7 @@ from .base import (
     TimeOut,
 )
 from .calib import Calib
+from .compression import CG2, DRAE, DRPE, CompressedGrid
 from .environments import (
     Environment,
     FlowField,

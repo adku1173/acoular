@@ -14,6 +14,7 @@ The following modules are part of Acoular:
     aiaa
     base
     calib
+    compression
     configuration
     demo
     deprecation
